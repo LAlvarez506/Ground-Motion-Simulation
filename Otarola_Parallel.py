@@ -293,6 +293,8 @@ class EQ(object):
     amp_funct = None
     amp_freq = freq_ps
     kappa = 0.03
+    kappa_type = None
+    shift_freq = None
     f_max = None
     
     # - Signal processing
@@ -500,6 +502,13 @@ class EQ(object):
         if 'kappa' in parameters:
             if parameters['kappa'] is not None:
                 EQ.kappa = parameters['kappa']
+        if 'kappa_type' in parameters:
+            if parameters['kappa_type'] is not None:
+                EQ.kappa_type = parameters['kappa_type']
+            if 'shift_freq' in parameters:
+                if parameters['shift_freq'] is not None:
+                    EQ.shift_freq = parameters['shift_freq']
+
         if 'f_max' in parameters:
             if parameters['f_max'] is not None:
                 EQ.f_max = parameters['f_max']
@@ -891,22 +900,22 @@ class psource(EQ):
             f = 1.0
         else:
             f = factor
-        A = []
-        self.spec_shape = [1./(1. + (f/fc)**2.) for f in EQ.freq_ps]
+        
+        self.spec_shape = 1./(1. + (EQ.freq_ps/fc)**2.)
         
         if wave_type is 'S':
             self.P = self.path(wave_type, self.R_s)
         else:
             self.P = self.path(wave_type, self.R_p)
         
-        self.G = Methods.site(EQ.amp_type,EQ.amp_freq,EQ.amp_funct,EQ.Hypocenter,
-                                    self.depth_list,self.vs,self.rho,EQ.Betha,
-                                    EQ.Rho,EQ.f_max,EQ.kappa,EQ.freq_ps)
+        self.G = Methods.site(EQ.amp_type, EQ.amp_freq, EQ.amp_funct,
+                              EQ.Hypocenter, self.depth_list, self.vs,
+                              self.rho, EQ.Betha, EQ.Rho, EQ.f_max,
+                              EQ.kappa, EQ.freq_ps, kappa_type=EQ.kappa_type, 
+                              shift_freq=EQ.shift_freq)
         
-        self.I = [(2.*m.pi*f)**2. for f in EQ.freq_ps]
-        for i in range(len(EQ.freq_ps)):
-            A.append(C*self.spec_shape[i]*self.P[i]*self.G[i]*self.I[i]*f)
-
+        self.I = (2.*m.pi*EQ.freq_ps)**2.
+        A = C*self.spec_shape*self.P*self.G*self.I*f
         return A
  ######################################################################       
     def path(self,wave_type, distance):
