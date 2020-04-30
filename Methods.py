@@ -492,7 +492,9 @@ class GMSM():
             fft = np.concatenate((DC,fft_pos,np.flip(fft_neg,axis=0)))
         return fft                    
  ######################################################################       
-    def site(self,amp_type,amp_freq,amp_funct,Hypocenter,depth_list,betha_list,density_list,betha,density,f_max,kappa,freq):
+    def site(self, amp_type, amp_freq, amp_funct, Hypocenter, depth_list,
+             betha_list, density_list, betha,density, f_max, kappa, freq,
+             kappa_type=None, shift_freq=None):
         """
         Amplification and de amplification terms for effects other than the path
         """
@@ -543,9 +545,16 @@ class GMSM():
         
         ## - Diminution
         if f_max == None:
-            D = np.exp(-1*m.pi*kappa*freq) 
+            if kappa_type is None:
+                D = np.exp(-1*m.pi*kappa*freq) 
+            elif kappa_type is 'shifted':
+                if shift_freq is None:
+                    f_shift = 15.
+                else:
+                    f_shift = shift_freq
+                D = np.array([1. if f_i <= f_shift else np.exp(-1.*m.pi*kappa*(f_i - f_shift)) for f_i in freq])
         else:
-            D = (1.+(f_i/f_max)**8.)**-0.5*np.exp(-1.*m.pi*kappa*freq)
+            D = (1.+(freq/f_max)**8.)**-0.5
         
         G = D*Amp_standard
         return G                
