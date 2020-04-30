@@ -71,8 +71,9 @@ class calibrate(object):
     resume_boolean = False
     partial_data = {}
     
-    def __init__(self,observed,input_parameters,cal_metric,variable,iterations=5,n_sim=5,nu=0.5,
-                 n_processors=None,wd_GMSM=None,id=None,resume=None,resume_file=None,fit_range=None,n_pre_samples=None,error_type=1):
+    def __init__(self,observed, input_parameters, cal_metric, variable, iterations=5, n_sim=5, nu=0.5,
+                 error_type=1, n_processors=None, wd_GMSM=None, id=None,resume=None, resume_file=None, 
+                 fit_range=None, n_pre_samples=None, message=None):
         
         # - Instance dedicated to safe the gaussian models during the optimization process
         self.gaussian_model = []
@@ -188,7 +189,7 @@ class calibrate(object):
             print('Error type = ' + str(error_descript))
             print('###########################################')
         
-            self.output.process_log(self.id,init=True,init_dict={'variables':variable,'component':str(self.input_parameters['component']),'kernel_nu':str(self.nu),'freq corr':self.input_parameters['correlation'],'metric':cal_metric,'nw':self.input_parameters['nw'],'nl':self.input_parameters['nl'],'error_type':error_descript,                                                                'simulations':n_sim,'iterations':iterations,'processors':calibrate.n_processors})
+            self.output.process_log(self.id, init=True, init_dict={'variables':variable, 'component':str(self.input_parameters['component']),'kernel_nu':str(self.nu),'freq corr':self.input_parameters['correlation'], 'metric':cal_metric, 'nw':self.input_parameters['nw'], 'nl':self.input_parameters['nl'], 'error_type':error_descript,                                                                'simulations':n_sim, 'iterations':iterations, 'processors':calibrate.n_processors, 'message': message})
         # --------------------------------- #
         # - Resume calibration
         else:
@@ -612,7 +613,6 @@ class calibrate(object):
             Mw, component = self.observed[key_event]['Mw'],self.input_parameters['component']
             simulation_acc, simulation_im, distance = sim_fas_multiple(Mw,self.input_parameters,calibrate.n_sim,component,
                                                          calibrate.dt,abcissa,calibrate.b,calibrate.delta_az,calibrate.pp)
-            
             # - Compute biases
             im_sim = []
             for i in range(len(abcissa)):

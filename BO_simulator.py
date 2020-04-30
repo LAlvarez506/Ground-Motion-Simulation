@@ -2,9 +2,6 @@ from BO_output import bo_output
 output = bo_output()
 import time
 import numpy as np
-import sys
-wd_GMSM = '/home/a35479/Bureau/PhD/Codes/StochasticGM/GMSM'
-sys.path.insert(0,wd_GMSM)    
 from Methods import GMSM
 Methods = GMSM()
 from Otarola_Parallel import EQ
