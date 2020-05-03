@@ -11,7 +11,8 @@ Bayesian optimization for N parameters of a function.  Maximizes of minimizes a 
 Gaussian processes.  Optimal solution is found for a given number of iterations.  Parallel processing is employed to speed up computations
 """
 from BO_output import bo_output
-from BO_simulator import sim_fas_multiple,sim_spectrum_single
+from BO_simulator import *
+from LibraryGMPE import Zhao_2006
 from Methods import GMSM
 #from sim_parallel import simulation
 import multiprocessing
@@ -33,14 +34,12 @@ class calibrate(object):
     # - Default signal properties
     ## - Frequencies
     freq_max = 24
-    freqs = np.logspace(np.log10(0.1),np.log10(freq_max),20)
+    freqs = np.linspace(0.01, 24., 20)
     freqs_calibration = []
     
     # - Periods
-    period_max = 5.0
-    periods = np.logspace(np.log10(0.00001),np.log10(period_max),20)
-    periods_calibration = []
-    
+    periods = np.linspace(0., 5., 51)
+    periods_calibration = [0., 5.]
     
     dt = 0.01
     logscale = True
@@ -106,7 +105,7 @@ class calibrate(object):
                     calibrate.freqs_calibration = [calibrate.freqs[0],calibrate.freqs[-1]]
                 else: 
                     calibrate.freqs_calibration = fit_range
-            if cal_metric is 'spectrum':
+            if (cal_metric is 'spectrum' or cal_metric is 'spectra' or cal_metric is 'GMPE'):
                 if fit_range is None:
                     calibrate.periods_calibration = [calibrate.periods[0],calibrate.periods[-1]]
                 else: 
@@ -531,15 +530,9 @@ class calibrate(object):
                 save_partial()
 
 ###############################################################################################################################################################
-    def avg_IM(self,x,im_reference):
-        IM_reference = []
-        for i in range(len(x)):
-            temp = []
-            for j in range(len(im_reference)):
-                temp.append(im_reference[j][i])
-            avg = np.mean(temp)
-            IM_reference.append(avg)
-        return IM_reference
+    def avg_IM(self,list_standarized):
+        list_standarized = np.array(list_standarized)
+        return list_standarized.mean(axis=0)
 ###############################################################################################################################################################
     def reference_metric(self):
         if self.cal_metric == 'spectrum':
@@ -559,7 +552,18 @@ class calibrate(object):
                 im_reference.append(fas_observed)
 
             # - Get the mean  reference IM 
-            self.IM_reference = self.avg_IM(calibrate.freqs,im_reference)
+            self.IM_reference = self.avg_IM(im_reference)
+
+        elif (self.cal_metric == 'spectra' or self.cal_metric == 'EXSIM_spectra'):
+            self.metric_reference = {}
+            im_reference  = []
+            for key_event in self.observed:
+                sa_observed = np.interp(calibrate.periods, self.observed[key_event]['periods'], self.observed[key_event]['sa'])
+                self.metric_reference[key_event] = sa_observed
+                im_reference.append(sa_observed)
+
+            # - Get the mean  reference IM 
+            self.IM_reference = self.avg_IM(im_reference)
                 
             # - Save partial results
             calibrate.partial_data['IM_reference'] = self.IM_reference
@@ -702,7 +706,7 @@ class calibrate(object):
             bias_per_abcissa[f] = {'abcissa':freq,'bias':temp,'bias_mean':np.mean(temp),'bias_std':np.std(temp)}
 
         # - Plot the bias for the iteration
-        ref_bias_plot = self.output.bias_per_iteration(calibrate.freqs,bias_per_abcissa,xlegend,
+        ref_bias_plot = self.output.bias_per_iteration(abcissa,bias_per_abcissa,xlegend,
                                        save_path=self.id + '//bias_' + ' iteration ' + str(self.n) + '.jpg')        
         
         # ------------ SAVE ITERATION RESULTS  ---------------- #
@@ -749,11 +753,418 @@ class calibrate(object):
 
 
             ### - Plot the average IM for the best solution
-            self.IM_sim = self.avg_IM(abcissa,IM_sim_list)
+            self.IM_sim = self.avg_IM(IM_sim_list)
             title = str(self.id) + ' iteration ' + str(self.n) + ' - IM comparison'
             self.output.avg_IM_comparison(abcissa,self.IM_sim,self.IM_reference,xlegend,ylegend,logscale=calibrate.logscale,
                                           title=title,save_path=self.id + '//' + title + '.jpg')
 
+        else:
+            self.n_not_improv += 1
+            
+        # ------------ VARIABLE EXPLORATION PLOT  ---------------- #
+        trial = np.linspace(0,self.n,self.n+1)
+        for key in self.tried_variables:
+            # Save name check
+            key_save = ''
+            for l in key:
+                if l == '_':
+                    pass
+                else:
+                    key_save += l
+            self.output.variable_exploration(key,calibrate.c_map,trial,self.tried_variables[key],self.error,save_path = self.id + '//' + key_save +'.jpg')
+        
+        # ------------ ITERATION PERFORMANCE INFO  ---------------- #
+        t3 = time.time()    
+        running_time = t3-t0
+        
+        if calibrate.stats_boolean == True:
+            print('Iteration time = ' + str("%.3f" % round(running_time,3)) + 's')
+            print('Error = ' + str(error_aggregated))
+        
+        # - Log up the process
+        info = info + ' Error = ' + str(error_aggregated)
+        self.output.process_log(self.id,message=info)
+        return np.array(error_aggregated)
+ ##############################################################################################           
+    def sa_multiple(self,X):
+        from Otarola_Parallel import EQ
+        t0 = time.time()
+        # --------------------------------- #
+        self.n += 1
+        self.output.process_log(self.id,message='#### - Iteration #' + str(self.n) + ' - ###')
+        # --------------------------------- #   
+        # - Assign the trial value to the parameters
+        info = ''
+        for parameter,x in zip(self.opt_param,X) :
+            self.tried_variables[parameter].append(x)
+            info = info + parameter + ' = ' + "%.2f" % x + ', '
+            print(parameter + ' = ' + str(x))
+            self.input_parameters[parameter] = x
+            
+        # --------------------------------- #   
+        # - Define abcissa based on calobration metric
+        IM_sim_list = []
+        abcissa = calibrate.periods
+        xlegend = 'Periods [s]'
+        ylegend = 'Sa [cm/s/s]'
+            
+        # ------------ SIMULATION AND INDIVIDUAL EVENT BIAS ---------------- #   
+        Error, Bias, Sim_dist, Sim_acc, Sim_im = {},{},{},{},{}
+        for key_event in self.observed:
+            error = 0.0
+            Bias[key_event] = {}
+            
+            # - Introduce event features
+            if 'Depth' in self.observed[key_event]:
+                self.input_parameters['Depth'] =  self.observed[key_event]['Depth']
+            if 'Alpha' in self.observed[key_event]:
+                self.input_parameters['Alpha'] =  self.observed[key_event]['Alpha']   
+            if 'Betha' in self.observed[key_event]:
+                self.input_parameters['Betha'] =  self.observed[key_event]['Betha']
+            if 'vs' in self.observed[key_event]:
+                self.input_parameters['vs'] =  self.observed[key_event]['vs']   
+            if 'vp' in self.observed[key_event]:
+                self.input_parameters['vp'] =  self.observed[key_event]['vp']
+            if 'hypocenter' in self.observed[key_event]:
+                self.input_parameters['hypocenter'] =  self.observed[key_event]['hypocenter']
+            self.input_parameters['site'] = self.observed[key_event]['site']
+            
+            # - Simulate and compute IM
+            Mw, component = self.observed[key_event]['Mw'], self.input_parameters['component']
+            simulation_acc, simulation_im, distance = sim_sa_multiple(Mw, self.input_parameters, calibrate.n_sim, component,
+                                                         calibrate.dt, abcissa, calibrate.damping)
+            # - Compute biases
+            im_sim = []
+            for i in range(len(abcissa)):
+                bias_temp,sim_temp = [],[]
+                for j in range(len(simulation_im)):
+                    sim_temp.append(simulation_im[j][i])
+                    bias_temp.append(np.log(self.metric_reference[key_event][i]/simulation_im[j][i]))
+                
+                Bias[key_event][abcissa[i]] = bias_temp
+                im_sim.append(np.mean(sim_temp))
+                
+                # - Error per event
+                if calibrate.periods[i] >= calibrate.periods_calibration[0] and calibrate.periods[i] <= calibrate.periods_calibration[1]:
+                    error += np.mean(bias_temp)**2
+
+            # - Save event results
+            IM_sim_list.append(im_sim)
+            Sim_acc[key_event] = simulation_acc
+            Sim_im[key_event] = simulation_im
+            Sim_dist[key_event] = distance
+            Error[key_event] = error
+            
+            # - Stats
+            if calibrate.stats_boolean == True:
+                print(key_event + ' - Distance: ' + str(distance) + ' - Error: ' + str(error))
+        
+        # ------------ EVENT ARRAY AGGREGATED BIAS AND ERROR  ---------------- #   
+        ## - ERROR
+        # - Distance bias
+        distances, err = [], []
+        for key_event in Error:
+            distances.append(Sim_dist[key_event])
+            err.append(Error[key_event])
+            
+        errors = [errors_i for _,errors_i in sorted(zip(distances,err))]
+        distances.sort()
+        
+        x = np.array(distances).reshape((-1, 1))
+        y = np.array(errors)
+        model = LinearRegression().fit(x, y)
+        slope_error = model.coef_[0]
+        b_error = model.intercept_
+
+        if calibrate.error_type == 1:
+            """
+            Squared root of the mean suquared of the errors
+            """
+            error_aggregated = 0.0
+            for key in Error:
+                error_aggregated += Error[key]**2.
+            error_aggregated = (error_aggregated/len(Error))**0.5
+        
+        elif calibrate.error_type == 2:
+            """
+            Maximum error
+            """
+            error_aggregated = 0.0
+            for key in Error:
+                if Error[key] > error_aggregated:
+                    error_aggregated = Error[key]
+            error_aggregated = (error_aggregated)**0.5
+        
+        elif calibrate.error_type == 3:
+            """
+            Combined error.  Bias slope (distance vs error) and maximum error
+            """
+            # - Frequency related error
+            freq_error = 0.0
+            for key in Error:
+                freq_error += Error[key]**2.
+            freq_error = (freq_error/len(Error))**0.5
+            
+            # - Aggregate errors
+            error_aggregated = freq_error*(1 + abs(slope_error))
+            
+            
+        # - BIAS
+        bias_per_abcissa = {}
+        for f in abcissa:
+            bias_per_abcissa[f] = {}
+            temp,freq = [],[]
+            for key in Bias:
+                for i in range(len(Bias[key][f])):
+                    temp.append(Bias[key][f][i])
+                    freq.append(f)
+            
+            bias_per_abcissa[f] = {'abcissa':freq,'bias':temp,'bias_mean':np.mean(temp),'bias_std':np.std(temp)}
+
+        # - Plot the bias for the iteration
+        ref_bias_plot = self.output.bias_per_iteration(abcissa,bias_per_abcissa,xlegend,
+                                       save_path=self.id + '//bias_' + ' iteration ' + str(self.n) + '.jpg')        
+        
+        # ------------ SAVE ITERATION RESULTS  ---------------- #
+        self.points.append(X)
+        self.sim_im.append(Sim_im)
+        self.sim_r_rup.append(Sim_dist)
+        self.sim_acc.append(Sim_acc)
+        self.error.append(error_aggregated)
+        self.bias_aggregated.append(bias_per_abcissa)
+        self.bias_individual.append(Bias)
+
+        
+        # ------------ BEST SOLUTION   ---------------- #
+        if error_aggregated <= self.error_min:
+            self.n_not_improv = 0
+            self.error_min = error_aggregated
+            self.best_performance['sim_acc'] = Sim_acc
+            self.best_performance['sim_im'] = Sim_im
+            self.best_performance['sim_r_rup'] = Sim_dist
+            self.best_performance['bias_info'] = bias_per_abcissa
+            self.best_performance['bias_individual'] = Bias
+                
+            ### - Aggregated distance bias 
+            title = 'Aggregated distance bias'
+            self.output.distance_bias_plot(distances,errors,b_error,slope_error,title=title,save_path= self.id + '//' + title + '.jpg')
+            
+
+
+            ### - Plot the average IM for the best solution
+            self.IM_sim = self.avg_IM(IM_sim_list)
+            title = str(self.id) + ' iteration ' + str(self.n) + ' - IM comparison'
+            self.output.avg_IM_comparison(abcissa,self.IM_sim,self.IM_reference,xlegend,ylegend,logscale=calibrate.logscale,
+                                          title=title,save_path=self.id + '//' + title + '.jpg')
+        else:
+            self.n_not_improv += 1
+            
+        # ------------ VARIABLE EXPLORATION PLOT  ---------------- #
+        trial = np.linspace(0,self.n,self.n+1)
+        for key in self.tried_variables:
+            # Save name check
+            key_save = ''
+            for l in key:
+                if l == '_':
+                    pass
+                else:
+                    key_save += l
+            self.output.variable_exploration(key,calibrate.c_map,trial,self.tried_variables[key],self.error,save_path = self.id + '//' + key_save +'.jpg')
+        
+        # ------------ ITERATION PERFORMANCE INFO  ---------------- #
+        t3 = time.time()    
+        running_time = t3-t0
+        
+        if calibrate.stats_boolean == True:
+            print('Iteration time = ' + str("%.3f" % round(running_time,3)) + 's')
+            print('Error = ' + str(error_aggregated))
+        
+        # - Log up the process
+        info = info + ' Error = ' + str(error_aggregated)
+        self.output.process_log(self.id,message=info)
+        return np.array(error_aggregated)
+  ##############################################################################################           
+    def gmpe_multiple(self,X):
+        from Otarola_Parallel import EQ
+        t0 = time.time()
+        # --------------------------------- #
+        self.n += 1
+        self.output.process_log(self.id,message='#### - Iteration #' + str(self.n) + ' - ###')
+        # --------------------------------- #   
+        # - Assign the trial value to the parameters
+        info = ''
+        for parameter,x in zip(self.opt_param,X) :
+            self.tried_variables[parameter].append(x)
+            info = info + parameter + ' = ' + "%.2f" % x + ', '
+            print(parameter + ' = ' + str(x))
+            self.input_parameters[parameter] = x
+            
+        # --------------------------------- #   
+        # - Define abcissa based on calobration metric
+        IM_sim_list = []
+        abcissa = calibrate.periods
+        xlegend = 'Periods [s]'
+        ylegend = 'Sa [cm/s/s]'
+            
+        # ------------ SIMULATION AND INDIVIDUAL EVENT BIAS ---------------- #   
+        Error, Bias, Sim_dist, Sim_acc, Sim_im = {},{},{},{},{}
+        for key_event in self.observed:
+            error = 0.0
+            Bias[key_event] = {}
+            
+            # - Introduce event features
+            if 'Depth' in self.observed[key_event]:
+                self.input_parameters['Depth'] =  self.observed[key_event]['Depth']
+            if 'Alpha' in self.observed[key_event]:
+                self.input_parameters['Alpha'] =  self.observed[key_event]['Alpha']   
+            if 'Betha' in self.observed[key_event]:
+                self.input_parameters['Betha'] =  self.observed[key_event]['Betha']
+            if 'vs' in self.observed[key_event]:
+                self.input_parameters['vs'] =  self.observed[key_event]['vs']   
+            if 'vp' in self.observed[key_event]:
+                self.input_parameters['vp'] =  self.observed[key_event]['vp']
+            if 'hypocenter' in self.observed[key_event]:
+                self.input_parameters['hypocenter'] =  self.observed[key_event]['hypocenter']
+            self.input_parameters['site'] = self.observed[key_event]['site']
+            
+            # - Simulate and compute IM
+            Mw, component = self.observed[key_event]['Mw'], self.input_parameters['component']
+            simulation_acc, simulation_im, distance = sim_sa_multiple(Mw, self.input_parameters, calibrate.n_sim, component,
+                                                         calibrate.dt, abcissa, calibrate.damping)
+            
+            
+            self.metric_reference = []
+            for pi in calibrate.abcissa:
+                sa, sigma = Zhao_2006(pi,self.observed[key_event]['Mw'], distance, self.input_parameters['hypocenter'][2],
+                                      self.input_parameters['vs30'],0, 1, 0, 0)
+                
+                self.metric_reference.append(sa*981.)
+                
+            self.metric_reference = np.array(self.metric_reference)
+                
+            # - Compute biases
+            im_sim = []
+            for i in range(len(abcissa)):
+                bias_temp,sim_temp = [],[]
+                for j in range(len(simulation_im)):
+                    sim_temp.append(simulation_im[j][i])
+                    bias_temp.append(np.log(self.metric_reference[i]/simulation_im[j][i]))
+                
+                Bias[key_event][abcissa[i]] = bias_temp
+                im_sim.append(np.mean(sim_temp))
+                
+                # - Error per event
+                if calibrate.periods[i] >= calibrate.periods_calibration[0] and calibrate.periods[i] <= calibrate.periods_calibration[1]:
+                    error += np.mean(bias_temp)**2
+
+            # - Save event results
+            IM_sim_list.append(im_sim)
+            Sim_acc[key_event] = simulation_acc
+            Sim_im[key_event] = simulation_im
+            Sim_dist[key_event] = distance
+            Error[key_event] = error
+            
+            # - Stats
+            if calibrate.stats_boolean == True:
+                print(key_event + ' - Distance: ' + str(distance) + ' - Error: ' + str(error))
+        
+        # ------------ EVENT ARRAY AGGREGATED BIAS AND ERROR  ---------------- #   
+        ## - ERROR
+        # - Distance bias
+        distances, err = [], []
+        for key_event in Error:
+            distances.append(Sim_dist[key_event])
+            err.append(Error[key_event])
+            
+        errors = [errors_i for _,errors_i in sorted(zip(distances,err))]
+        distances.sort()
+        
+        x = np.array(distances).reshape((-1, 1))
+        y = np.array(errors)
+        model = LinearRegression().fit(x, y)
+        slope_error = model.coef_[0]
+        b_error = model.intercept_
+
+        if calibrate.error_type == 1:
+            """
+            Squared root of the mean suquared of the errors
+            """
+            error_aggregated = 0.0
+            for key in Error:
+                error_aggregated += Error[key]**2.
+            error_aggregated = (error_aggregated/len(Error))**0.5
+        
+        elif calibrate.error_type == 2:
+            """
+            Maximum error
+            """
+            error_aggregated = 0.0
+            for key in Error:
+                if Error[key] > error_aggregated:
+                    error_aggregated = Error[key]
+            error_aggregated = (error_aggregated)**0.5
+        
+        elif calibrate.error_type == 3:
+            """
+            Combined error.  Bias slope (distance vs error) and maximum error
+            """
+            # - Frequency related error
+            freq_error = 0.0
+            for key in Error:
+                freq_error += Error[key]**2.
+            freq_error = (freq_error/len(Error))**0.5
+            
+            # - Aggregate errors
+            error_aggregated = freq_error*(1 + abs(slope_error))
+            
+            
+        # - BIAS
+        bias_per_abcissa = {}
+        for f in abcissa:
+            bias_per_abcissa[f] = {}
+            temp,freq = [],[]
+            for key in Bias:
+                for i in range(len(Bias[key][f])):
+                    temp.append(Bias[key][f][i])
+                    freq.append(f)
+            
+            bias_per_abcissa[f] = {'abcissa':freq,'bias':temp,'bias_mean':np.mean(temp),'bias_std':np.std(temp)}
+
+        # - Plot the bias for the iteration
+        ref_bias_plot = self.output.bias_per_iteration(abcissa,bias_per_abcissa,xlegend,
+                                       save_path=self.id + '//bias_' + ' iteration ' + str(self.n) + '.jpg')        
+        
+        # ------------ SAVE ITERATION RESULTS  ---------------- #
+        self.points.append(X)
+        self.sim_im.append(Sim_im)
+        self.sim_r_rup.append(Sim_dist)
+        self.sim_acc.append(Sim_acc)
+        self.error.append(error_aggregated)
+        self.bias_aggregated.append(bias_per_abcissa)
+        self.bias_individual.append(Bias)
+
+        
+        # ------------ BEST SOLUTION   ---------------- #
+        if error_aggregated <= self.error_min:
+            self.n_not_improv = 0
+            self.error_min = error_aggregated
+            self.best_performance['sim_acc'] = Sim_acc
+            self.best_performance['sim_im'] = Sim_im
+            self.best_performance['sim_r_rup'] = Sim_dist
+            self.best_performance['bias_info'] = bias_per_abcissa
+            self.best_performance['bias_individual'] = Bias
+                
+            ### - Aggregated distance bias 
+            title = 'Aggregated distance bias'
+            self.output.distance_bias_plot(distances,errors,b_error,slope_error,title=title,save_path= self.id + '//' + title + '.jpg')
+            
+
+
+            ### - Plot the average IM for the best solution
+            self.IM_sim = self.avg_IM(IM_sim_list)
+            title = str(self.id) + ' iteration ' + str(self.n) + ' - IM comparison'
+            self.output.avg_IM_comparison(abcissa,self.IM_sim,self.IM_reference,xlegend,ylegend,logscale=calibrate.logscale,
+                                          title=title,save_path=self.id + '//' + title + '.jpg')
         else:
             self.n_not_improv += 1
             
@@ -846,7 +1257,7 @@ class calibrate(object):
                 Error += np.mean(bias_temp)**2
 
         # - Plot the bias for the iteration
-        ref_bias_plot = self.output.bias_per_iteration(calibrate.periods,bias_per_abcissa,xlegend,
+        ref_bias_plot = self.output.bias_per_iteration(abcissa, bias_per_abcissa,xlegend,
                                        save_path=self.id + '//bias_' + ' iteration ' + str(self.n) + '.jpg')        
         
         
@@ -869,7 +1280,7 @@ class calibrate(object):
 
 
             ### - Plot the average IM for the best solution
-            self.IM_sim = self.avg_IM(abcissa,metric_sim)
+            self.IM_sim = self.avg_IM(metric_sim)
             title = str(self.id) + ' iteration ' + str(self.n) + ' - IM comparison'
             self.output.avg_IM_comparison(abcissa,self.IM_sim,self.IM_reference,xlegend,ylegend,logscale=calibrate.logscale,
                                           title=title,save_path=self.id + '//' + title + '.jpg')
@@ -899,7 +1310,206 @@ class calibrate(object):
         self.output.process_log(self.id,message=info)
         return np.array(Error)
  
- ##############################################################################################     
+ ##############################################################################################
+  ##############################################################################################           
+    def EXSIM_sa_multiple(self,X):
+        from Otarola_Parallel import EQ
+        t0 = time.time()
+        # --------------------------------- #
+        self.n += 1
+        self.output.process_log(self.id,message='#### - Iteration #' + str(self.n) + ' - ###')
+        # --------------------------------- #   
+        # - Assign the trial value to the parameters
+        info = ''
+        for parameter,x in zip(self.opt_param,X) :
+            self.tried_variables[parameter].append(x)
+            info = info + parameter + ' = ' + "%.2f" % x + ', '
+            print(parameter + ' = ' + str(x))
+            self.input_parameters[parameter] = x
+            
+        # --------------------------------- #   
+        # - Define abcissa based on calobration metric
+        IM_sim_list = []
+        abcissa = calibrate.periods
+        xlegend = 'Periods [s]'
+        ylegend = 'Sa [cm/s/s]'
+            
+        # ------------ SIMULATION AND INDIVIDUAL EVENT BIAS ---------------- #   
+        Error, Bias, Sim_dist, Sim_acc, Sim_im = {},{},{},{},{}
+        for key_event in self.observed:
+            error = 0.0
+            Bias[key_event] = {}
+            
+            # - Introduce event features
+            if 'Depth' in self.observed[key_event]:
+                self.input_parameters['Depth'] =  self.observed[key_event]['Depth']
+            if 'Alpha' in self.observed[key_event]:
+                self.input_parameters['Alpha'] =  self.observed[key_event]['Alpha']   
+            if 'Betha' in self.observed[key_event]:
+                self.input_parameters['Betha'] =  self.observed[key_event]['Betha']
+            if 'vs' in self.observed[key_event]:
+                self.input_parameters['vs'] =  self.observed[key_event]['vs']   
+            if 'vp' in self.observed[key_event]:
+                self.input_parameters['vp'] =  self.observed[key_event]['vp']
+            if 'hypocenter' in self.observed[key_event]:
+                self.input_parameters['hypocenter'] =  self.observed[key_event]['hypocenter']
+            self.input_parameters['site'] = self.observed[key_event]['site']
+            
+            # - Simulate and compute IM
+            Mw, component = self.observed[key_event]['Mw'], self.input_parameters['component']
+            simulation_acc, simulation_im, distance = EXSIM_sa_multiple(Mw, self.input_parameters, calibrate.n_sim, component,
+                                                         calibrate.dt, abcissa, calibrate.damping)
+            # - Compute biases
+            im_sim = []
+            for i in range(len(abcissa)):
+                bias_temp,sim_temp = [],[]
+                for j in range(len(simulation_im)):
+                    sim_temp.append(simulation_im[j][i])
+                    bias_temp.append(np.log(self.metric_reference[key_event][i]/simulation_im[j][i]))
+                
+                Bias[key_event][abcissa[i]] = bias_temp
+                im_sim.append(np.mean(sim_temp))
+                
+                # - Error per event
+                if calibrate.periods[i] >= calibrate.periods_calibration[0] and calibrate.periods[i] <= calibrate.periods_calibration[1]:
+                    error += np.mean(bias_temp)**2
+
+            # - Save event results
+            IM_sim_list.append(im_sim)
+            Sim_acc[key_event] = simulation_acc
+            Sim_im[key_event] = simulation_im
+            Sim_dist[key_event] = distance
+            Error[key_event] = error
+            
+            # - Stats
+            if calibrate.stats_boolean == True:
+                print(key_event + ' - Distance: ' + str(distance) + ' - Error: ' + str(error))
+        
+        # ------------ EVENT ARRAY AGGREGATED BIAS AND ERROR  ---------------- #   
+        ## - ERROR
+        # - Distance bias
+        distances, err = [], []
+        for key_event in Error:
+            distances.append(Sim_dist[key_event])
+            err.append(Error[key_event])
+            
+        errors = [errors_i for _,errors_i in sorted(zip(distances,err))]
+        distances.sort()
+        
+        x = np.array(distances).reshape((-1, 1))
+        y = np.array(errors)
+        model = LinearRegression().fit(x, y)
+        slope_error = model.coef_[0]
+        b_error = model.intercept_
+
+        if calibrate.error_type == 1:
+            """
+            Squared root of the mean suquared of the errors
+            """
+            error_aggregated = 0.0
+            for key in Error:
+                error_aggregated += Error[key]**2.
+            error_aggregated = (error_aggregated/len(Error))**0.5
+        
+        elif calibrate.error_type == 2:
+            """
+            Maximum error
+            """
+            error_aggregated = 0.0
+            for key in Error:
+                if Error[key] > error_aggregated:
+                    error_aggregated = Error[key]
+            error_aggregated = (error_aggregated)**0.5
+        
+        elif calibrate.error_type == 3:
+            """
+            Combined error.  Bias slope (distance vs error) and maximum error
+            """
+            # - Frequency related error
+            freq_error = 0.0
+            for key in Error:
+                freq_error += Error[key]**2.
+            freq_error = (freq_error/len(Error))**0.5
+            
+            # - Aggregate errors
+            error_aggregated = freq_error*(1 + abs(slope_error))
+            
+            
+        # - BIAS
+        bias_per_abcissa = {}
+        for f in abcissa:
+            bias_per_abcissa[f] = {}
+            temp,freq = [],[]
+            for key in Bias:
+                for i in range(len(Bias[key][f])):
+                    temp.append(Bias[key][f][i])
+                    freq.append(f)
+            
+            bias_per_abcissa[f] = {'abcissa':freq,'bias':temp,'bias_mean':np.mean(temp),'bias_std':np.std(temp)}
+
+        # - Plot the bias for the iteration
+        ref_bias_plot = self.output.bias_per_iteration(abcissa,bias_per_abcissa,xlegend,
+                                       save_path=self.id + '//bias_' + ' iteration ' + str(self.n) + '.jpg')        
+        
+        # ------------ SAVE ITERATION RESULTS  ---------------- #
+        self.points.append(X)
+        self.sim_im.append(Sim_im)
+        self.sim_r_rup.append(Sim_dist)
+        self.sim_acc.append(Sim_acc)
+        self.error.append(error_aggregated)
+        self.bias_aggregated.append(bias_per_abcissa)
+        self.bias_individual.append(Bias)
+
+        
+        # ------------ BEST SOLUTION   ---------------- #
+        if error_aggregated <= self.error_min:
+            self.n_not_improv = 0
+            self.error_min = error_aggregated
+            self.best_performance['sim_acc'] = Sim_acc
+            self.best_performance['sim_im'] = Sim_im
+            self.best_performance['sim_r_rup'] = Sim_dist
+            self.best_performance['bias_info'] = bias_per_abcissa
+            self.best_performance['bias_individual'] = Bias
+                
+            ### - Aggregated distance bias 
+            title = 'Aggregated distance bias'
+            self.output.distance_bias_plot(distances,errors,b_error,slope_error,title=title,save_path= self.id + '//' + title + '.jpg')
+            
+
+
+            ### - Plot the average IM for the best solution
+            self.IM_sim = self.avg_IM(IM_sim_list)
+            title = str(self.id) + ' iteration ' + str(self.n) + ' - IM comparison'
+            self.output.avg_IM_comparison(abcissa,self.IM_sim,self.IM_reference,xlegend,ylegend,logscale=calibrate.logscale,
+                                          title=title,save_path=self.id + '//' + title + '.jpg')
+        else:
+            self.n_not_improv += 1
+            
+        # ------------ VARIABLE EXPLORATION PLOT  ---------------- #
+        trial = np.linspace(0,self.n,self.n+1)
+        for key in self.tried_variables:
+            # Save name check
+            key_save = ''
+            for l in key:
+                if l == '_':
+                    pass
+                else:
+                    key_save += l
+            self.output.variable_exploration(key,calibrate.c_map,trial,self.tried_variables[key],self.error,save_path = self.id + '//' + key_save +'.jpg')
+        
+        # ------------ ITERATION PERFORMANCE INFO  ---------------- #
+        t3 = time.time()    
+        running_time = t3-t0
+        
+        if calibrate.stats_boolean == True:
+            print('Iteration time = ' + str("%.3f" % round(running_time,3)) + 's')
+            print('Error = ' + str(error_aggregated))
+        
+        # - Log up the process
+        info = info + ' Error = ' + str(error_aggregated)
+        self.output.process_log(self.id,message=info)
+        return np.array(error_aggregated)
+##############################################################################################         
     def opt_resume(self):
         self.opt_minimize()
         
@@ -907,6 +1517,12 @@ class calibrate(object):
     def opt_minimize(self):
         if self.cal_metric == 'fas':
             self.bayesian_optimisation(self.iterations, self.fas_multiple, self.bounds, x0=None, n_pre_samples=calibrate.n_pre_samples,gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7,maximize=False)
+        elif self.cal_metric == 'spectra':
+            self.bayesian_optimisation(self.iterations, self.sa_multiple, self.bounds, x0=None, n_pre_samples=calibrate.n_pre_samples,gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7,maximize=False)
+        elif self.cal_metric == 'EXSIM_spectra':
+            self.bayesian_optimisation(self.iterations, self.EXSIM_sa_multiple, self.bounds, x0=None, n_pre_samples=calibrate.n_pre_samples,gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7,maximize=False)
+        elif self.cal_metric == 'gmpe':
+            self.bayesian_optimisation(self.iterations, self.gmpe_multiple, self.bounds, x0=None, n_pre_samples=calibrate.n_pre_samples,gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7,maximize=False)
         elif self.cal_metric == 'spectrum':
             self.bayesian_optimisation(self.iterations, self.black_box_spectrum, self.bounds, x0=None, n_pre_samples=calibrate.n_pre_samples,gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7,maximize=False)
         
@@ -916,8 +1532,6 @@ class calibrate(object):
         self.performances['error'] = self.error
         self.performances['bias_aggregated'] = self.bias_aggregated
         self.performances['bias_individual'] = self.bias_individual
-        self.performances['training_data'] = self.xp
-        self.performances['training_scores'] = self.yp
         
         # - Plot trial - error evolution
         n = len(self.points)

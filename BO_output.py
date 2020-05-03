@@ -55,7 +55,6 @@ class bo_output:
 
         plt.xlabel(xlegend,figure=fig,fontsize=16)
         plt.ylabel(r"$\mathrm{Divergence}$",figure=fig,fontsize=16)
-        plt.xscale("log")
         plt.grid(figure=fig)
         plt.savefig(save_path)
         plt.close(fig)
