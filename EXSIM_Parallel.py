@@ -57,13 +57,16 @@ def add_noise(params):
         """
         seed = sim_seed[i]
         time, wind = Methods.window_function(envelope,PSource[i]['tgm'],delta_t)
+        
         wNoise = Methods.white_noise(len(time),random_seed=seed)
         windowed = wNoise*wind
+        bcw = Methods.boxcar_window(len(windowed))
+        windowed = bcw*windowed
         fft_noise,freqs_noise = Methods.FFT(windowed,delta_t, norm='ortho')    
         fft_noise = Methods.norm_power_spec(fft_noise,freqs_noise)
 
         # - Scale windowed noise to the underline spectrum
-        atr['SH'],atr['t_acc_sh'], atr['dt'] = Methods.scale_spectrum(PSource[i]['A_sh'],fft_noise,freqs_noise,time,standard_freqs)
+        atr['SH'], atr['t_acc_sh'], atr['dt'] = Methods.scale_spectrum(PSource[i]['A_sh'], fft_noise, freqs_noise, time,standard_freqs)
         
         # - Compute the time array of the waves
         atr['t_sh'] = PSource[i]['t_rupture'] + PSource[i]['to_s'] + atr['t_acc_sh']
@@ -514,42 +517,59 @@ class EQ(object):
         self.R_rup,self.R_jb = Methods.compute_rupture_distances(EQ.vertices,EQ.site_coord,n=20)
  ######################################################################
     def mesh(self):
+        """
+        Point source case
+        """
+        if EQ.nl == 1 and EQ.nl == 1:
+            EQ.N_psources = len(EQ.sub_fault_centroid)
+            PSource = []
+            PSource.append(psource(EQ.sub_fault_centroid[0],EQ.Mo,1,self.sub_source_trup[0]))
+        
 
-        slip, phase = self.source.random_slip(EQ.nl,EQ.nw)
-        rows,columns = slip.shape[0],slip.shape[1]
-        
-        #vectorize the matrix with the asperities
-        slip_vector = []
-        for i in range(rows):
-            for j in range(columns):
-                slip_vector.append(slip[i][j])
-        
-        # - Compute sub_source seismic moment - #
-        EQ.N_psources = len(EQ.sub_fault_centroid)
-        temp_Mo = []
-        for i in range(EQ.N_psources):
-            temp_Mo.append(EQ.rigidity*self.source.sub_source_area*slip_vector[i]*10**16.0)
-        Mo_scale_factor = EQ.Mo/sum(temp_Mo)
+        else:
+            # - Create the correlated slip distribution - #
+            stochastic_field = {'slip_mean':EQ.slip_mean,'slip_cov':EQ.slip_cov,
+                                'seed':None,'correlation_type':EQ.slip_dist,
+                                'Mw':self.Mw,'H':EQ.H}
             
-        # - Create point sources 
-        PSource,slip_scaled = [],[]
-        for i in range(EQ.N_psources):
-            slip_i = slip_vector[i]*Mo_scale_factor
-            Mo_ij = EQ.rigidity*self.source.sub_source_area*slip_i*10**16.0
-            slip_scaled.append(slip_i)
+            
+            self.source.generate_slip(EQ.L,EQ.W,EQ.nl,EQ.nw,stochastic_field=stochastic_field)
+            slip = np.flip(np.transpose(self.source.slip_dist),axis=0)
+            rows,columns = slip.shape[0],slip.shape[1]
+            
+            #vectorize the matrix with the asperities
+            slip_vector = []
+            for i in range(rows):
+                for j in range(columns):
+                    slip_vector.append(slip[i][j])
+            
+            # - Compute sub_source seismic moment - #
+            EQ.N_psources = len(EQ.sub_fault_centroid)
+
+            temp_Mo = []
+            for i in range(EQ.N_psources):
+                temp_Mo.append(EQ.rigidity*self.source.sub_source_area*slip_vector[i]*10**16.0)
+            Mo_scale_factor = EQ.Mo/sum(temp_Mo)
                 
-            N_PSource_i = psource(EQ.sub_fault_centroid[i],Mo_ij,self.sub_source_activation[i]+1,self.sub_source_trup[i])
-            PSource.append(N_PSource_i) 
-        
-        # - Recover the normalized slip
-        self.slip_distribution = np.zeros((self.nl,self.nw))
-        count = 0
-        for i in range(len(slip)):
-            for j in range(len(slip)):
-                self.slip_distribution[i,j] = slip_scaled[count]
-                count += 1
-        
-        self.slip_distribution = np.flip(np.transpose(self.slip_distribution),axis=0)
+            # - Create point sources 
+            PSource,slip_scaled = [],[]
+            for i in range(EQ.N_psources):
+                slip_i = slip_vector[i]*Mo_scale_factor
+                Mo_ij = EQ.rigidity*self.source.sub_source_area*slip_i*10**16.0
+                slip_scaled.append(slip_i)
+                    
+                N_PSource_i = psource(EQ.sub_fault_centroid[i],Mo_ij,self.sub_source_activation[i]+1,self.sub_source_trup[i])
+                PSource.append(N_PSource_i) 
+            
+            # - Recover the normalized slip
+            self.slip_distribution = np.zeros((rows,columns))
+            count = 0
+            for i in range(rows):
+                for j in range(columns):
+                    self.slip_distribution[i,j] = slip_scaled[count]
+                    count += 1
+            
+            self.slip_distribution = np.flip(np.transpose(self.slip_distribution),axis=0)
         return PSource
         
  ########################################################################
