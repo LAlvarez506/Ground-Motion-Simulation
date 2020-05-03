@@ -695,7 +695,7 @@ class GMSM():
         n = len(acc)
         FAS = 2.0*np.abs(np.fft.rfft(acc))
         freqs = np.fft.rfftfreq(n, d=dt)
-        return freqs,FAS 
+        return freqs, FAS 
     ######################################################################        
     def FAS_rotComp(self,ew_acc,ns_acc,d_az,pp,dt):
         """
@@ -794,64 +794,22 @@ class GMSM():
             interest: list including the amounts of energy of interest, these will be identified in the plot
             plot: Boolean indicating if plotting or notation
         """
-        interest,plot = None,None
-        acc,dt,units = parameters['acc'],parameters['dt'],parameters['units']
-        if 'plot' in parameters:
-            plot = parameters['plot']
+        interest = None
+        acc, dt, units = np.array(parameters['acc']), parameters['dt'], parameters['units']
         if 'interest' in parameters:
             interest = parameters['interest']            
             
         if units == 'g':
-            acc_sq = [(981.0*i)**2 for i in acc]
+            acc_sq = (acc*981.)**2. 
         elif units == 'cm/s2':
-            acc_sq = [i**2 for i in acc]
+            acc_sq = (acc)**2.
         elif units == 'm/s2':
-            acc_sq = [(i*100.0)**2 for i in acc]
-        g = 981.0
-
-        arias,count,time_acumulated,acc_temp = 0.0,0,0.0,[]
-        Arias,time = [],[]
+            acc_sq = (acc*100.)**2.
         
-        for i in range(len(acc)):
-            acc_temp.append(acc_sq[i])
-            time_acumulated += dt
-            count += 1
-            if count >= 2:
-                arias += np.pi/(2*g)*it.simps(acc_temp,x=None,dx=dt,even='avg')
-                Arias.append(arias)
-                time.append(time_acumulated)
-                count, acc_temp = 0,[]
-        
-                
-        # - Find instants of interest (defined as a percentage of the maximum)
-        if interest is not None:
-            arias_max = max(Arias)
-            t_interest,arias_interest = [],[]
-            for target in interest:
-                for i in range(1,len(Arias)-1):
-                    if Arias[i-1]/arias_max <= target and Arias[i+1]/arias_max >= target:
-                        t_interest.append(time[i])
-                        arias_interest.append(Arias[i]/arias_max)
-                        break
-            result = [max(Arias),Arias,time,t_interest,arias_interest]
-        else:
-            result = time,Arias
-            
-        if plot is True:
-            plt.figure()
-            plt.title('Arias intensity')
-            plt.plot(time,Arias,label='_nolegend_')
-            if interest != None:
-                for i in range(len(interest)):
-                    plt.plot([t_interest[i],t_interest[i]],[0.0,arias_interest[i]*arias_max],label= str(interest[i]*100.0)+'% - ' +str(np.round(t_interest[i],2)))
-            plt.xlabel('t [s]',fontsize = 12)
-            plt.ylabel('Intensity [cm/s]',fontsize = 12)
-            plt.grid()
-            if interest != None:
-                plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15),frameon=False,ncol=len(interest))
-            plt.show()
-            plt.close()
-        return result
+        g = 981.
+        t = np.linspace(0., acc.shape[0]*dt, acc.shape[0])
+        arias = np.pi/(2*g)*scipy.integrate.cumtrapz(acc_sq, t, initial=0)
+        return t, arias
  
     ###################################################################### 
     def ariasI_rotComp(self,ew_acc,ns_acc,d_az,pp,dt,units):
@@ -949,31 +907,17 @@ class GMSM():
                 -'m/s2'
         plot: Boolean indicating if plotting or notation
         """
-        plot = None
-        acc,dt,units = parameters['acc'],parameters['dt'],parameters['units']
-        if 'plot' in parameters:
-            plot = parameters['plot']
-            
+        acc, dt, units = np.array(parameters['acc']), parameters['dt'], parameters['units']
+     
         if units == 'g':
-            acc = [i*981.0 for i in acc]
+            acc = acc*981.
         elif units == 'cm/s2':
-            acc = [i for i in acc]
+            acc = acc
         elif units == 'm/s2':
-            acc = [i*100.0 for i in acc]
+            acc = acc*100.
             
         pga = max(max(acc), abs(min(acc)))
         
-        if plot is True:
-            import matplotlib.pyplot as plt
-            t = np.linspace(0.0,dt*len(acc),len(acc))
-            plt.figure()
-            plt.plot(t,acc,label='PGA = '+ str("%.3f" % round(pga,3)) + 'cm/s2')
-            plt.xlabel('Time [s]')
-            plt.ylabel('Acceleration [cm/s2]')
-            plt.grid()
-            plt.legend()
-            plt.show()
-            plt.close()
             
         return pga
     ###################################################################### 
@@ -996,33 +940,18 @@ class GMSM():
                 -'m/s2'
         plot: Boolean indicating if plotting or notation
         """
-        plot = None
-        acc,dt,units = parameters['acc'],parameters['dt'],parameters['units']
-        if 'plot' in parameters:
-            plot = parameters['plot']
-
+        acc, dt, units = np.array(parameters['acc']), parameters['dt'], parameters['units']
+      
         if units == 'g':
-            acc = [i*981.0 for i in acc]
+            acc = acc*981.
         elif units == 'cm/s2':
-            acc = [i for i in acc]
+            acc = acc
         elif units == 'm/s2':
-            acc = [i*100.0 for i in acc]
+            acc = acc*100.
             
         acc = np.array(acc)        
-        vel= it.cumtrapz(acc,dx = dt,initial=0.0)
+        vel= it.cumtrapz(acc, dx = dt, initial=0.0)
         pgv = max(max(vel), abs(min(vel)))
-        
-        if plot is True:
-            import matplotlib.pyplot as plt
-            t = np.linspace(0.0,dt*len(acc),len(acc))
-            plt.figure()
-            plt.plot(t,vel,label='PGV = '+ str("%.3f" % round(pgv,3)) + 'cm/s')
-            plt.xlabel('Time [s]')
-            plt.ylabel('velocity [cm/s]')
-            plt.grid()
-            plt.legend()
-            plt.show()
-            plt.close()
         
         return pgv
     ###################################################################### 
@@ -1045,35 +974,18 @@ class GMSM():
                 -'m/s2'
         plot: Boolean indicating if plotting or notation
         """
-        import scipy.integrate as it
-        plot = None
-        acc,dt,units = parameters['acc'],parameters['dt'],parameters['units']
-        if 'plot' in parameters:
-            plot = parameters['plot']
-            
+        acc, dt, units = np.array(parameters['acc']), parameters['dt'], parameters['units']
+      
         if units == 'g':
-            acc = [i*981.0 for i in acc]
+            acc = acc*981.
         elif units == 'cm/s2':
-            acc = [i for i in acc]
+            acc = acc
         elif units == 'm/s2':
-            acc = [i*100.0 for i in acc]
-            
-        acc = np.array(acc)        
-        vel= it.cumtrapz(acc,dx = dt,initial=0.0)
-        disp= it.cumtrapz(vel,dx = dt,initial=0.0)
+            acc = acc*100.
+                
+        vel= it.cumtrapz(acc, dx = dt, initial=0.0)
+        disp= it.cumtrapz(vel, dx = dt, initial=0.0)
         pgd = max(max(disp), abs(min(disp)))
- 
-        if plot is True:
-            import matplotlib.pyplot as plt
-            t = np.linspace(0.0,dt*len(acc),len(acc))
-            plt.figure()
-            plt.plot(t,disp,label='PGD = '+ str("%.3f" % round(pgd,3)) + 'cm')
-            plt.xlabel('Time [s]')
-            plt.ylabel('displacement [cm]')
-            plt.grid()
-            plt.legend()
-            plt.show()
-            plt.close()
  
         return pgd
     ###################################################################### 
