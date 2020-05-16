@@ -54,7 +54,7 @@ class EQ(object):
     dt = 0.01
     samples_t = 0
     t = []
-    freq_ps = np.logspace(np.log10(0.001),np.log10(100.), 1000)
+    freq_ps = np.linspace(0.001, 100., 1000)
     fc = 0.0
     fc_baseline = None
     order_PostProcess = 3
@@ -69,12 +69,12 @@ class EQ(object):
     # - Source
     ## - Geometry
     L,W = None,None
-    nl,nw = 2,2
+    nl,nw = 2, 2
     fault_type = 'All'
     fault_geom_Mw = None
     rigidity = 32e9
-    rake = 0.0
-    dip = 90.0
+    rake = 0.
+    dip = 90.
     random_strike = None
     random_dip = None
     hyp_L = 0.5
@@ -503,14 +503,14 @@ class EQ(object):
             EQ.N_psources = len(EQ.sub_fault_centroid)
             temp_Mo = []
             for i in range(EQ.N_psources):
-                temp_Mo.append(EQ.rigidity*self.source.sub_source_area*slip_vector[i]*10**16.0)
+                temp_Mo.append(EQ.rigidity*self.source.sub_source_area*slip_vector[i]*10**16.)
             Mo_scale_factor = EQ.Mo/sum(temp_Mo)
                 
             # - Create point sources 
             self.PSource,slip_scaled = [],[]
             for i in range(EQ.N_psources):
                 slip_i = slip_vector[i]*Mo_scale_factor
-                Mo_ij = EQ.rigidity*self.source.sub_source_area*slip_i*10**16.0
+                Mo_ij = EQ.rigidity*self.source.sub_source_area*slip_i*10**16.
                 slip_scaled.append(slip_i)
                     
                 N_PSource_i = psource(EQ.sub_fault_centroid[i],Mo_ij,self.sub_source_activation[i]+1,self.sub_source_trup[i])
@@ -548,117 +548,119 @@ class EQ(object):
         a_UD = np.sum(a_UD_i, axis = 1)
         return a_NS, a_EW, a_UD
 #--------------------------------------------------------------------------------------------#       
-    def stochastic_noise(self,PSource):
-        atr = {}
-        """
-        Each finite fault point source has the same frequency noise 
-        """
-        if EQ.random_seed_boolean is False:
-            seed = np.random.randint(0,1e8)
-        else:
-            seed = EQ.random_seed
+    def stochastic_noise(self, X):
+        PSource = X[0]
+        seed = X[1]
+        n_samples = X[2]
+        window = X[3]
         
-        time,wind = Methods.window_function(EQ.window,PSource.tgm,EQ.dt)
+        atr = {}
+        time = np.arange(0., n_samples*EQ.dt, EQ.dt)
+        
+        ## - Create the windows
+        # - P wave
+        wn = window['P']['wind']
+        start_index =  int((PSource.to_p + PSource.t_rupture)/EQ.dt)
+        P_window = np.concatenate((np.zeros(start_index), wn, np.zeros(n_samples - (len(wn) + start_index))))
+        
+        # - S wave
+        wn = window['S']['wind']
+        start_index =  int((PSource.to_s + PSource.t_rupture)/EQ.dt)
+        S_window = np.concatenate((np.zeros(start_index), wn, np.zeros(n_samples - (len(wn) + start_index))))
+        
+        
+        ## - Create the correlated noise
         if EQ.correlation is True:
             fft_corr = Methods.correlated_spectrum(random_seed=None)
             Noise_corr = Methods.IFFT(fft_corr, norm='ortho')
             Noise_corr =  scipy.signal.resample(Noise_corr.real, len(time))
-            windowed = wind*Noise_corr
-            bcw = Methods.boxcar_window(len(windowed))
-            windowed = bcw*windowed
-            fft_noise,freqs_noise = Methods.FFT(windowed, EQ.dt, norm='ortho')    
-            fft_noise = Methods.norm_power_spec(fft_noise, freqs_noise)
+            
+            # - P waves
+            windowed_p = Noise_corr * P_window
+            bcw = Methods.boxcar_window(len(windowed_p))
+            windowed_p = bcw * windowed_p
+            fft_noise_p, freqs_noise_p = Methods.FFT(windowed_p, EQ.dt, norm='ortho')    
+            fft_noise_p = Methods.norm_power_spec(fft_noise_p, freqs_noise_p)
+            
+            # - S waves
+            windowed_s = Noise_corr * S_window
+            bcw = Methods.boxcar_window(len(windowed_s))
+            windowed_s = bcw * windowed_s
+            fft_noise_s, freqs_noise_s = Methods.FFT(windowed_s, EQ.dt, norm='ortho')    
+            fft_noise_s = Methods.norm_power_spec(fft_noise_s, freqs_noise_s)
             
         else:
             wNoise = Methods.white_noise(len(time),random_seed=seed)
-            windowed = wNoise*wind
-            bcw = Methods.boxcar_window(len(windowed))
-            windowed = bcw*windowed
-            fft_noise,freqs_noise = Methods.FFT(windowed, EQ.dt, norm='ortho')    
-            fft_noise = Methods.norm_power_spec(fft_noise, freqs_noise)
+            
+            # - P waves
+            windowed_p = wNoise*P_window
+            bcw = Methods.boxcar_window(len(windowed_p))
+            windowed_p = bcw*windowed_p
+            fft_noise_p, freqs_noise_p = Methods.FFT(windowed_p, EQ.dt, norm='ortho')    
+            fft_noise_p = Methods.norm_power_spec(fft_noise_p, freqs_noise_p)
+            
+            # - S waves
+            windowed_s = wNoise*S_window
+            bcw = Methods.boxcar_window(len(windowed_s))
+            windowed_s = bcw*windowed_s
+            fft_noise_s, freqs_noise_s = Methods.FFT(windowed_s, EQ.dt, norm='ortho')    
+            fft_noise_s = Methods.norm_power_spec(fft_noise_s, freqs_noise_s)
     
         # - Scale the base spectra to the frequency noise
-        atr['P_vertical'], atr['t_acc_pv'], atr['dt'] = Methods.scale_spectrum(PSource.A_p_vertical,fft_noise,freqs_noise,time,EQ.freq_ps)
-        atr['P_radial'], atr['t_acc_pr'], atr['dt'] = Methods.scale_spectrum(PSource.A_p_radial,fft_noise,freqs_noise,time,EQ.freq_ps)
-        atr['SV_vertical'], atr['t_acc_svv'], atr['dt'] = Methods.scale_spectrum(PSource.A_sv_vertical,fft_noise,freqs_noise,time,EQ.freq_ps)
-        atr['SV_radial'], atr['t_acc_svr'], atr['dt'] = Methods.scale_spectrum(PSource.A_sv_radial,fft_noise,freqs_noise,time,EQ.freq_ps)
-        atr['SH'], atr['t_acc_sh'], atr['dt'] = Methods.scale_spectrum(PSource.A_sh,fft_noise,freqs_noise,time,EQ.freq_ps)
-        
-        # - Compute the time array of the waves
-        atr['t_pv'] = PSource.t_rupture + PSource.to_p + atr['t_acc_pv']
-        atr['t_pr'] = PSource.t_rupture + PSource.to_p + atr['t_acc_pr']
-        atr['t_svv'] = PSource.t_rupture + PSource.to_s + atr['t_acc_svv']
-        atr['t_svr'] = PSource.t_rupture + PSource.to_s + atr['t_acc_svr']
-        atr['t_sh'] = PSource.t_rupture + PSource.to_s + atr['t_acc_sh']
-        
-        # - Store normalization factors
-        atr['H_p_ij'] = PSource.H_p_ij
-        atr['H_s_ij'] = PSource.H_s_ij
+        atr['P_vertical'], atr['t_acc_pv'] = Methods.scale_spectrum(PSource.A_p_vertical, fft_noise_p, freqs_noise_p, time, EQ.freq_ps, factor=PSource.H_p_ij)
+        atr['P_radial'], atr['t_acc_pr'] = Methods.scale_spectrum(PSource.A_p_radial, fft_noise_p, freqs_noise_p, time, EQ.freq_ps, factor=PSource.H_p_ij)
+        atr['SV_vertical'], atr['t_acc_svv'] = Methods.scale_spectrum(PSource.A_sv_vertical, fft_noise_s, freqs_noise_s, time, EQ.freq_ps, factor=PSource.H_s_ij)
+        atr['SV_radial'], atr['t_acc_svr'] = Methods.scale_spectrum(PSource.A_sv_radial, fft_noise_s, freqs_noise_s, time, EQ.freq_ps, factor=PSource.H_s_ij)
+        atr['SH'], atr['t_acc_sh'] = Methods.scale_spectrum(PSource.A_sh, fft_noise_s, freqs_noise_s, time, EQ.freq_ps, factor=PSource.H_s_ij)
+
         # - Store azimuth angle
         atr['phi'] = PSource.azimuth
-        # - Keep track of the maximum lag time
-        atr['lag'] = PSource.t_rupture + PSource.to_s
 
-        # - Keep track of the maximum duration
-        atr['duration'] = max(max(atr['t_pv']),max(atr['t_pr']),max(atr['t_svv']),max(atr['t_svr']),max(atr['t_sh']))
         return atr
-#--------------------------------------------------------------------------------------------#       
-    def standarize_psource(self,p):
-        standarized = {}
-        standarized['phi'] = p['phi']
-        
-        # - Colect time histories
-        standarized['P_vertical'] = Methods.standarize_time(self.t_standard, p['t_pv'], p['P_vertical'].real, p['H_p_ij'], EQ.dt, p['dt'])
-        standarized['P_radial'] = Methods.standarize_time(self.t_standard, p['t_pr'], p['P_radial'].real, p['H_p_ij'], EQ.dt, p['dt'])
-        standarized['SV_vertical'] = Methods.standarize_time(self.t_standard, p['t_svv'], p['SV_vertical'].real, p['H_s_ij'], EQ.dt, p['dt'])
-        standarized['SV_radial'] = Methods.standarize_time(self.t_standard, p['t_svr'], p['SV_radial'].real, p['H_s_ij'], EQ.dt, p['dt']) 
-        standarized['SH'] = Methods.standarize_time(self.t_standard, p['t_sh'], p['SH'].real, p['H_s_ij'], EQ.dt, p['dt'])
-        return standarized
+
 #--------------------------------------------------------------------------------------------#       
     def aggregate_signal(self):
         t0 = time.time()
-        point = []
+        # - Create the windows 
+        Windows = {}
+        duration = 0.
+        for i in range(EQ.N_psources):
+            time_p, wind_p = Methods.window_function(EQ.window, self.PSource[i].tgm_p, EQ.dt)
+            time_s, wind_s = Methods.window_function(EQ.window, self.PSource[i].tgm_s, EQ.dt)
+            
+            Windows[i] = {'P':{'time':time_p, 'wind':wind_p}, 'S':{'time':time_s, 'wind':wind_s}}
+            total_time = max(self.PSource[i].to_s + self.PSource[i].t_rupture + max(time_s), self.PSource[i].to_p + self.PSource[i].t_rupture + max(time_p))
+            if total_time > duration:
+                duration = total_time
+                
+        duration = round(duration, 0) + 2.
+        n_samples = int(duration/EQ.dt)
+        self.t_standard = np.arange(0., n_samples*EQ.dt, EQ.dt)
+        
         # - Introduce the frequency noise to the base-spectra
         import multiprocessing
-        pool = multiprocessing.Pool(EQ.n_processors)
-        point = pool.map(self.stochastic_noise,self.PSource)
-        pool.close()
-        pool.join()
+        X = []
+        for i in range(EQ.N_psources):
+            seed = np.random.randint(1e8)
+            X.append((self.PSource[i], seed, n_samples, Windows[i]))
         
-        # - Retrieve the time
-        count = 0
-        for p in point:
-            if p['lag'] > EQ.lag_max:
-                EQ.lag_max = p['lag']
-            if p['duration'] > EQ.Tgm_max:
-                EQ.Tgm_max = p['duration']
-            count += 1
-        
-        n_samples = int((EQ.Tgm_max + 2.)/EQ.dt)
-        tf = n_samples*EQ.dt
-        self.t_standard = np.linspace(0.,tf,n_samples)
-
-        t01 = time.time()
-        ## - Create an standard time array and interpolate for all subaults
-        standarized = []
+        self.point = []
         pool = multiprocessing.Pool(EQ.n_processors)
-        standarized = pool.map(self.standarize_psource, point)
+        self.point = pool.map(self.stochastic_noise,X)
         pool.close()
         pool.join()
         
         self.P_vertical_i,self.P_radial_i = {},{}
         self.SV_vertical_i,self.SV_radial_i,self.SH_i = {},{},{}
         phi = []
-        for i in range(len(standarized)):
-            phi.append(standarized[i]['phi'])
-            self.P_vertical_i[i] = standarized[i]['P_vertical']
-            self.P_radial_i[i] = standarized[i]['P_radial']
-            self.SV_vertical_i[i] = standarized[i]['SV_vertical']
-            self.SV_radial_i[i] = standarized[i]['SV_radial']
-            self.SH_i[i] = standarized[i]['SH']
+        for i in range(EQ.N_psources):
+            phi.append(self.point[i]['phi'])
+            self.P_vertical_i[i] = self.point[i]['P_vertical']
+            self.P_radial_i[i] = self.point[i]['P_radial']
+            self.SV_vertical_i[i] = self.point[i]['SV_vertical']
+            self.SV_radial_i[i] = self.point[i]['SV_radial']
+            self.SH_i[i] = self.point[i]['SH']
 
-        t02 = time.time()
-        t_run = t02-t01
 
         ## - Rotate axis to NS, EW, UD and aggregate individual point source contribution
         # - Time histories
@@ -689,8 +691,8 @@ class EQ(object):
         def integration(acc):
             import scipy.integrate as it
             acc = np.array(acc)     
-            vel = it.cumtrapz(acc,dx = EQ.dt,initial=0.0)
-            disp = it.cumtrapz(vel,dx = EQ.dt,initial=0.0)
+            vel = it.cumtrapz(acc, dx = EQ.dt, initial=0.0)
+            disp = it.cumtrapz(vel, dx = EQ.dt, initial=0.0)
             return vel,disp
         
         # - Displacement and velocity time histories
@@ -828,14 +830,28 @@ class psource(EQ):
         self.rho = np.array([Methods.density_profile(v) for v in self.vs])
         
         # - Adjust arrays for ray propagation
+        ## - Array reaches the surface
         if self.depth_list[0] != 0.:
             self.depth_list = np.insert(self.depth_list, 0, 0.)
             self.vs = np.insert(self.vs, 0, self.vs[0])
             self.vp = np.insert(self.vp, 0, self.vp[0])
-        if self.depth_list[-1] != self.centroid[2]:
+        
+        ## - Characteristics at the rupture
+        if self.depth_list[-1] < self.centroid[2]:
             self.depth_list = np.insert(self.depth_list, len(self.depth_list), self.centroid[2])
-            self.vs = np.insert(self.vs, 0, self.vs[-1])
-            self.vp = np.insert(self.vp, 0, self.vp[-1])
+            self.vs = np.insert(self.vs, len(self.vs), EQ.Betha)
+            self.vp = np.insert(self.vp, len(self.vp), EQ.Alpha)
+        
+        elif self.depth_list[-1] > self.centroid[2]:
+            index = np.where(self.depth_list > self.centroid[2])[0][0] 
+            self.depth_list = self.depth_list[0:index]
+            self.vs = self.vs[0:index]
+            self.vp = self.vp[0:index]
+            
+            self.depth_list = np.insert(self.depth_list, len(self.depth_list), self.centroid[2])
+            self.vs = np.insert(self.vs, len(self.vs), EQ.Betha)
+            self.vp = np.insert(self.vp, len(self.vp), EQ.Alpha)
+
         
         # - S-wave propagation
         self.theta_s, self.R_s,  self.points_s, self.to_s = self.ray_propagation(self.depth_list, self.vs)
@@ -860,13 +876,18 @@ class psource(EQ):
                         subsource_duration = t(R)
                         break
                 return subsource_duration
-            self.t_path =  path_duration(self.R_s,EQ.path_duration,EQ.path_duration_lim)
+            self.t_path_s =  path_duration(self.R_s, EQ.path_duration, EQ.path_duration_lim)
+            self.t_path_p =  path_duration(self.R_p, EQ.path_duration, EQ.path_duration_lim)
             ## - Source duration
             self.t_source_s = EQ.source_duration(self.fc_s_ij)
-            self.tgm =  self.t_path + self.t_source_s
+            self.t_source_p = EQ.source_duration(self.fc_p_ij)
+            ## - Total duration
+            self.tgm_s =  self.t_path_s + self.t_source_s
+            self.tgm_p =  self.t_path_p + self.t_source_p
 
         else:
-            self.tgm =  EQ.Tgm
+            self.tgm_s =  EQ.Tgm
+            self.tgm_p =  EQ.Tgm
 
         # - Print info regarding point source
         if EQ.print_info == True:
@@ -902,11 +923,12 @@ class psource(EQ):
         ########################################
         def ray_propagation(theta,solver=True):
             Z = depth_inversed[0]
-            R, points = 0., []
+            R = 0.
             p_i = np.array([self.centroid[0], self.centroid[1]])
+            points_array = []
             index = 0
             t_prop = 0.
-            points.append(p_i)
+            points_array.append(self.centroid)
             while Z > 0.:
                 index += 1
                 dz = Z - depth_inversed[index]
@@ -917,19 +939,26 @@ class psource(EQ):
 
                 # - Update variables for next layer
                 Z -= dz
-                theta = np.arcsin(velocity_inversed[index]*np.sin(theta)/velocity_inversed[index-1])
+                snells = velocity_inversed[index]*m.sin(theta)/velocity_inversed[index-1]
+                try:
+                    theta = m.asin(snells)
+                except:
+                    theta = theta
+                
+                
+                
                 p_i = p_f
                 R += r
                 t_prop += r/velocity_inversed[index-1]
                 
                 # - Save partial results
-                points.append(p_f)
+                points_array.append(np.array([p_f[0], p_f[1], Z]))
             
             error = (EQ.site_coord[0] - p_f[0]) + (EQ.site_coord[1] - p_f[1])
             if solver is True:
                 return error
             else:
-                return theta, R, points, t_prop  
+                return theta, R, points_array, t_prop  
         ########################################
         
         # - Find optimal solution
@@ -946,24 +975,25 @@ class psource(EQ):
 #--------------------------------------------------------------------------------------------#            
     def spectra(self):
         # - Compute the radiation patterns
-        dip = EQ.dip*np.pi/180.0
-        rake = EQ.rake*np.pi/180.0
-        self.RP_p = np.sqrt(4.0/15.0)
-        self.RP_sv = 0.5*np.sqrt(np.sin(rake)**2.0*(14.0/15.0 + 1.0/3.0*np.sin(2.0*dip)**2.0) +
-                                  np.cos(rake)**2.0*(4.0/15.0 + 2.0/3.0*np.cos(dip)**2.0))
-        self.RP_sh = 0.5*np.sqrt(2.0/3.0*np.cos(rake)**2.0*(1+np.sin(dip)**2.0) +
-                                  1.0/3.0*np.sin(rake)**2.0*(1+np.cos(2.0*dip)**2.0))
+        dip = EQ.dip*np.pi/180.
+        rake = EQ.rake*np.pi/180.
+        self.RP_p = np.sqrt(4./15.)
+        self.RP_sv = 0.5*np.sqrt(np.sin(rake)**2.*(14./15. + 1./3.*np.sin(2.*dip)**2.) +
+                                  np.cos(rake)**2.*(4./15. + 2./3.*np.cos(dip)**2.))
+        self.RP_sh = 0.5*np.sqrt(2./3.*np.cos(rake)**2.*(1.+ np.sin(dip)**2.) +
+                                  1./3.*np.sin(rake)**2.*(1. + np.cos(2.*dip)**2.))
         
         # - Compute the free surface factors
-        FS_sv_radial,FS_sv_vertical,FS_p_radial,FS_p_vertical  = self.free_surface_calculator(EQ.Betha, EQ.Alpha, self.theta_s, self.theta_p)
+        FS_p_vertical, FS_p_radial = Methods.FS_pwaves(self.theta_p, self.vp[0], self.vs[0])
+        FS_sv_vertical, FS_sv_radial = Methods.FS_swaves(self.theta_s, self.vp[0], self.vs[0])
         FS_sh = 2.0
         
         # - Energy partition
-        EP_p_radial = -1*np.sin(self.theta_p)
+        EP_p_radial = -1.*np.sin(self.theta_p)
         EP_p_vertical = np.cos(self.theta_p)
         EP_sv_radial = EP_p_vertical
         EP_sv_vertical = np.sin(self.theta_s)
-        EP_sh = 1.0
+        EP_sh = 1.
         
         # - Corner frequencies
         ## - subfault
@@ -974,102 +1004,28 @@ class psource(EQ):
         self.fc_p = EQ.Alpha*self.fc_s/EQ.Betha
         
         # - Scaling factors Otarola
-        def scale_ratio(f,fc,fcij):
+        def scale_ratio(fc,fcij):
+            frequencies = np.linspace(0.1, 0.5/EQ.dt, 100)
             global_f = 0.0
             local_f = 0.0
-            for i in range(len(f)):
-                global_f += (f[i]**2/(1+(f[i]/fc)**2))**2
-                local_f += (f[i]**2/(1+(f[i]/fcij)**2))**2
+            for i in range(len(frequencies)):
+                global_f += (frequencies[i]**2./(1.+(frequencies[i]/fc)**2.))**2.
+                local_f += (frequencies[i]**2./(1.+(frequencies[i]/fcij)**2.))**2.
             return global_f,local_f
-        [global_p,local_p] = scale_ratio(EQ.freq_ps,self.fc_p,self.fc_p_ij) 
-        self.H_p_ij = EQ.Mo/self.Mo_ij*np.sqrt(1.0/EQ.N_psources*(global_p/local_p))
-        [global_s,local_s] = scale_ratio(EQ.freq_ps,self.fc_s,self.fc_s_ij) 
-        self.H_s_ij = EQ.Mo/self.Mo_ij*np.sqrt(1.0/EQ.N_psources*(global_s/local_s))
+        
+        [global_p,local_p] = scale_ratio(self.fc_p,self.fc_p_ij) 
+        self.H_p_ij = EQ.Mo/self.Mo_ij*np.sqrt(1./EQ.N_psources*(global_p/local_p))
+        
+        [global_s,local_s] = scale_ratio(self.fc_s,self.fc_s_ij) 
+        self.H_s_ij = EQ.Mo/self.Mo_ij*np.sqrt(1./EQ.N_psources*(global_s/local_s))
         
         # - Spectrum constant
-        self.C_p_vertical = self.RP_p*FS_p_vertical*EP_p_vertical*self.Mo_ij/(4*np.pi*EQ.Rho*EQ.Alpha**3)*(10**-20)
-        self.C_p_radial = self.RP_p*FS_p_radial*EP_p_radial*self.Mo_ij/(4*np.pi*EQ.Rho*EQ.Alpha**3)*(10**-20)
-        self.C_sv_vertical = self.RP_sv*FS_sv_vertical*EP_sv_vertical*self.Mo_ij/(4*np.pi*EQ.Rho*EQ.Betha**3)*(10**-20)
-        self.C_sv_radial = self.RP_sv*FS_sv_radial*EP_sv_radial*self.Mo_ij/(4*np.pi*EQ.Rho*EQ.Betha**3)*(10**-20)
-        self.C_sh = self.RP_sh*FS_sh*EP_sh*self.Mo_ij/(4*np.pi*EQ.Rho*EQ.Betha**3)*(10**-20)
-                    
- #--------------------------------------------------------------------------------------------#          
-    def free_surface(self):
-        discr = 20
-        ### - According to Evans 1984 and Otarola 2018
-        crit = np.arcsin(EQ.Betha/EQ.Alpha)
-        # - Secondary wave
-        j = np.concatenate((np.linspace(0.0,crit,discr),np.linspace(crit*1.05,np.pi/2,discr)))
-        n = len(j)
-        i,p,X,Y,Z = np.zeros(n),np.zeros(n),np.zeros(n),np.zeros(n),np.zeros(n)
-        SV_radial,SV_vertical = np.zeros(n),np.zeros(n)
-        
-        for index in range(n):
-            if j[index] <= crit:
-                i[index] = np.arcsin(np.sin(j[index])*EQ.Alpha/EQ.Betha)
-            p[index] = np.sin(j[index])/EQ.Betha
-            X[index] = 1/EQ.Betha**2 - 2*p[index]**2
-            Y[index] = 4*np.cos(i[index])*np.cos(j[index])/(EQ.Alpha*EQ.Betha)
-            Z[index] = X[index]**2 + p[index]**2*Y[index]
-            SV_radial[index] = abs(2*X[index]/(EQ.Betha**2*Z[index]))
-            SV_vertical[index] = Y[index]/(EQ.Betha**2*Z[index])
-            
-        # - Primary wave
-        i = np.linspace(0.0,np.pi/2,discr)
-        n = len(i)
-        j_p,p,X,Y,Z = np.zeros(n),np.zeros(n),np.zeros(n),np.zeros(n),np.zeros(n)
-        P_radial,P_vertical = np.zeros(n),np.zeros(n)
-        for index in range(n):
-            j_p[index] = np.arcsin(np.sin(i[index])/EQ.Alpha*EQ.Betha)
-            p[index] = np.sin(j_p[index])/EQ.Betha
-            X[index] = 1/EQ.Betha**2 - 2*p[index]**2
-            Y[index] = 4*np.cos(i[index])*np.cos(j_p[index])/(EQ.Alpha*EQ.Betha)
-            Z[index] = X[index]**2 + p[index]**2*Y[index]
-            P_vertical[index] = abs(2*X[index]/(EQ.Betha**2*Z[index]))
-            P_radial[index] = Y[index]/(EQ.Betha**2*Z[index])
-        
-        # - Plot
-        if EQ.plots_boolean == True:
-            plt.ioff()
-            fig = plt.figure()
-            plt.plot(j,SV_radial,'y-',figure=fig)
-            plt.plot(j,SV_vertical,'b-',figure=fig)
-            plt.plot(i,P_radial,'r-',figure=fig)
-            plt.plot(i,P_vertical,'g-',figure=fig)
-            plt.xlabel('Incidence angle [rad]',figure=fig)
-            plt.ylabel('Free surface factor [ ]',figure=fig)
-            plt.grid(figure=fig)
-            plt.close(fig)
-            self.free_surface_plot = fig
-        return j,SV_radial,SV_vertical,i,P_vertical,P_radial 
- #--------------------------------------------------------------------------------------------#          
-    def free_surface_calculator(self,betha, alpha, incidence_s, incidence_p):
-        ### - According to Evans 1984 and Otarola 2018
-        crit = np.arcsin(betha/alpha)
-        # - Secondary wave
-        j = incidence_s 
-        if j <= crit:
-            i = np.arcsin(np.sin(j)*alpha/betha)
-        else:
-            i = 0.0
-        p = np.sin(j)/betha
-        X = 1.0/betha**2 - 2*p**2
-        Y = 4.0*np.cos(i)*np.cos(j)/(alpha*betha)
-        Z = X**2.0 + p**2.0*Y
-        SV_radial = abs(2*X/(betha**2*Z))
-        SV_vertical = Y/(betha**2.0*Z)
+        self.C_p_vertical = self.RP_p*FS_p_vertical*EP_p_vertical*self.Mo_ij/(4.*np.pi*EQ.Rho*EQ.Alpha**3.)*(10.**-20.)
+        self.C_p_radial = self.RP_p*FS_p_radial*EP_p_radial*self.Mo_ij/(4.*np.pi*EQ.Rho*EQ.Alpha**3.)*(10.**-20.)
+        self.C_sv_vertical = self.RP_sv*FS_sv_vertical*EP_sv_vertical*self.Mo_ij/(4.*np.pi*EQ.Rho*EQ.Betha**3.)*(10.**-20.)
+        self.C_sv_radial = self.RP_sv*FS_sv_radial*EP_sv_radial*self.Mo_ij/(4.*np.pi*EQ.Rho*EQ.Betha**3.)*(10.**-20.)
+        self.C_sh = self.RP_sh*FS_sh*EP_sh*self.Mo_ij/(4*np.pi*EQ.Rho*EQ.Betha**3.)*(10.**-20.)
 
-        # - Primary wave
-        i = incidence_p
-        j_p = np.arcsin(np.sin(i)/alpha*betha)
-        p = np.sin(j_p)/betha
-        X = 1/betha**2 - 2*p**2
-        Y = 4*np.cos(i)*np.cos(j_p)/(alpha*betha)
-        Z = X**2 + p**2*Y
-        P_vertical = abs(2*X/(betha**2*Z))
-        P_radial = Y/(betha**2*Z)
-
-        return SV_radial,SV_vertical,P_radial,P_vertical
  #--------------------------------------------------------------------------------------------#       
     def build_spectra(self,C,fc,wave_type,factor):
         if factor == None:
