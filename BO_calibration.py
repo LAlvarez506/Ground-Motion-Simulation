@@ -811,6 +811,7 @@ class calibrate(object):
         # ------------ SIMULATION AND INDIVIDUAL EVENT BIAS ---------------- #   
         Error, Bias, Sim_dist, Sim_acc, Sim_im = {},{},{},{},{}
         for key_event in self.observed:
+            print('Started event: ' + key_event)
             error = 0.0
             Bias[key_event] = {}
             
@@ -857,7 +858,7 @@ class calibrate(object):
             
             # - Stats
             if calibrate.stats_boolean == True:
-                print(key_event + ' - Distance: ' + str(distance) + ' - Error: ' + str(error))
+                print('   ' + key_event + ' - Distance: ' + str(distance) + ' - Error: ' + str(error))
         
         # ------------ EVENT ARRAY AGGREGATED BIAS AND ERROR  ---------------- #   
         ## - ERROR
