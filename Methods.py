@@ -11,11 +11,12 @@ shared between GMSM, Otarola and SMSIM
 """
 from scipy.optimize import least_squares
 from scipy import signal as ScipySignal
+from scipy.signal import butter,lfilter,sosfilt
 import scipy.integrate as it
 import scipy
 from Source import source
 import numpy as np
-import math
+import math 
 import pickle
 import copy
 import os
@@ -34,40 +35,65 @@ class GMSM():
         self.smooting_values()
 
 ######################################################################  
-    def boxcar_window(self,n):
+    def boxcar_window(self, n):
         window = np.full((n,),1.)
         window[0] = 0.
         window[-1] = 0.
         return window
-
 ######################################################################  
-    def scale_spectrum(self,A_spectrum,noise_fft,noise_freqs,time,standard_freqs):
+    def scale_spectrum(self,A_spectrum, noise_fft, noise_freqs, time, standard_freqs, factor=None):
         A_spectrum = np.array(A_spectrum)
-        A_spectrum = A_spectrum.flatten()
         A = []
         for i in range(len(noise_fft)):
-            spectrum_factor = np.interp(abs(noise_freqs[i]),standard_freqs,A_spectrum)
+            spectrum_factor = np.interp(abs(noise_freqs[i]), standard_freqs, A_spectrum)
             A.append(spectrum_factor*noise_fft[i])
         
+        if factor is None:
+            A = np.array(A)    
+        else:
+            A = np.array(A)*factor
         sim_acc = self.IFFT(A,norm='ortho')
-        time_array = np.linspace(0.,max(time),len(sim_acc))
+        time_array = np.linspace(0.,max(time), len(sim_acc))
         dt = time_array[1]- time_array[0]
         sim_acc = sim_acc.real
-        
-        #def boxcar_window(n):
-            #window = np.full((n,),1.)
-            #window[0] = 0.
-            #window[-1] = 0.
-            #return window
-        
-        #window = boxcar_window(len(sim_acc))
-        #sim_acc = sim_acc*window
-        # - Include hanning window
-        #window = scipy.signal.windows.hann(len(sim_acc))
-        #sim_acc = sim_acc*window
                                            
-        return sim_acc, time_array, dt
-
+        return sim_acc, time_array
+######################################################################       
+    def FS_pwaves(self, theta, vp, vs):
+        i = theta
+        j_p = np.arcsin(np.sin(i)/vp*vs)
+        p = np.sin(j_p)/vs
+        X = 1/vs**2 - 2*p**2
+        Y = 4*np.cos(i)*np.cos(j_p)/(vp*vs)
+        Z = X**2 + p**2*Y
+        P_vertical = abs(2*X/(vs**2*Z))
+        P_radial = Y/(vs**2*Z)
+        return P_vertical, P_radial
+# ------------------------------------------------------------ #
+    def FS_swaves(self, theta, vp, vs):
+        C = vs/vp
+        if theta <= np.arcsin(C):
+            alpha = np.arcsin(vp/vs*np.sin(theta))
+            f1 = -(np.cos(2*theta)**2. - C**2.*np.sin(2.*theta)*np.sin(2*alpha))/(np.cos(2.*theta)**2. + C**2.*np.sin(2.*theta)*np.sin(2*alpha))
+            f2 = 2.*C*np.sin(2.*theta)*np.cos(2.*theta)/(np.cos(2.*theta)**2. + C**2.*np.sin(2.*theta)*np.sin(2*alpha))
+            SV_radial = 1. - f1 + f2*np.sin(alpha)/np.cos(theta) 
+            SV_vertical = 1. + f1 + f2*np.cos(alpha)/np.sin(theta)
+        else:
+            # - Rr:
+            a = np.cos(2*theta)**2.*np.cos(theta)
+            b = np.sqrt(np.sin(theta)**2. - C**2.)*np.sin(2.*theta)**2.
+            R = (a**2. + b**2.)**0.5
+            num = 2.*np.cos(2.*theta)
+            den = np.cos(2*theta)**4. + 4.*(np.sin(theta)**2. - C**2.)*np.sin(2*theta)**2.*np.sin(theta)**2.
+            SV_radial = abs(num/den * R/np.cos(theta))
+            
+            # - Rv:
+            a = 2.*np.sqrt(np.sin(theta)**2. - C**2.)*np.sin(2.*theta)*np.sin(theta)
+            b = np.cos(2.*theta)**2.
+            R = (a**2. + b**2.)**0.5
+            num = 2.*np.sqrt(np.sin(theta)**2. - C**2.)*np.sin(2.*theta)
+            SV_vertical = num/den * R/np.sin(theta)
+        return SV_vertical, SV_radial
  ######################################################################       
     def rotate_axis(self,t_standard,radial,tangential,vertical,phi,N_psources):
         m = len(t_standard)
@@ -413,7 +439,7 @@ class GMSM():
         wNoise = np.random.normal(mean, std, size=samples_t)
         return wNoise
 ######################################################################    
-    def window_function(self,window,Tgm,dt):
+    def window_function(self,window, Tgm, dt):
         import math as m
         # - Create the window
         Tw = window['f_tgm']*Tgm
@@ -434,7 +460,7 @@ class GMSM():
             envelope.append(wind)
             if wind >= w_max:
                 w_max = wind
-            if wind < 0.005*w_max:
+            if wind < 0.0005*w_max:
                 stop_flag = True
 
         return np.array(time), np.array(envelope)
@@ -498,9 +524,7 @@ class GMSM():
         """
         Amplification and de amplification terms for effects other than the path
         """
-        from scipy import integrate
-        import matplotlib.pyplot as plt
-        import math as m
+
         ### --- Paramters: Z_s - Rupture depth, Betha - Profile of velocities --- ###
         # Rho - profile of densities, Depth - Array with depths for the previous profiles
         freq = np.array(freq)
@@ -546,13 +570,13 @@ class GMSM():
         ## - Diminution
         if f_max == None:
             if kappa_type is None:
-                D = np.exp(-1*m.pi*kappa*freq) 
+                D = np.exp(-1*math.pi*kappa*freq) 
             elif kappa_type is 'shifted':
                 if shift_freq is None:
                     f_shift = 15.
                 else:
                     f_shift = shift_freq
-                D = np.array([1. if f_i <= f_shift else np.exp(-1.*m.pi*kappa*(f_i - f_shift)) for f_i in freq])
+                D = np.array([1. if f_i <= f_shift else np.exp(-1.*math.pi*kappa*(f_i - f_shift)) for f_i in freq])
         else:
             D = (1.+(freq/f_max)**8.)**-0.5
         
@@ -1511,8 +1535,6 @@ class GMSM():
         #2) Window
         s2 = cosine_window(s1)
         #3) Zeropadding
-        if fc is None:
-            fc = self.fc_filter(s2,dt,units=units)
         s3 = zero_padding(s2,fc,order,dt=dt)
         #4) Filter
         s4 = butter_highpass_filter(s3,fc,dt,order=order)
