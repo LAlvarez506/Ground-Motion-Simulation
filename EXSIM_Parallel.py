@@ -597,12 +597,36 @@ class psource(EQ):
         self.Mo_ij = Mo_ij
         self.t_rupture = t_rupture
         self.R_hyp = np.linalg.norm(np.array(centroid) - np.array(EQ.site_coord))
-        self.ray_path()
+        
+        
+        # - Define the soil layers
+        if EQ.Depth is None:
+            self.depth_list = np.linspace(0.0,self.centroid[2],2)
+            self.vs = np.full((len(self.depth_list), ), EQ.Betha)
+            
+        else:
+            # - Check if the depth array starts with zero
+            self.depth_list = np.array(EQ.Depth)
+            self.vs = np.array(EQ.vs)
+
+        self.rho = np.array([Methods.density_profile(v) for v in self.vs])
+        
+        # - Adjust arrays for ray propagation
+        if self.depth_list[0] != 0.:
+            self.depth_list = np.insert(self.depth_list, 0, 0.)
+            self.vs = np.insert(self.vs, 0, self.vs[0])
+        if self.depth_list[-1] != self.centroid[2]:
+            self.depth_list = np.insert(self.depth_list, len(self.depth_list), self.centroid[2])
+            self.vs = np.insert(self.vs, 0, self.vs[-1])
+        
+        # - S-wave propagation
+        self.incidence, self.R,  self.points_s, self.to_s = self.ray_propagation(self.depth_list, self.vs)
+
         self.spectra()
         t0 = time.time()
         self.A_sh = self.build_spectra(self.C_sh,self.fc_s_ij,'S',1.0)
         t1 = time.time()
-        
+
         # - Duration
         if EQ.boolean_tgm == False:
             ## - Path duration
@@ -622,36 +646,12 @@ class psource(EQ):
             self.tgm =  EQ.Tgm
 
  #######################################################       
-    def ray_path(self):
+    def ray_propagation(self, depth_list, velocity):
         t2 = time.time()
         
-        # - Define shear velocity profile
-        if EQ.vs is None:
-            self.depth_list = np.linspace(0.0,self.centroid[2],3)
-            self.vs = [Methods.velocity_profile(z) for z in self.depth_list]
-            self.rho = [Methods.density_profile(v) for v in self.vs]
-        else:
-            # - Check if the depth array starts with zero
-            temp_depth = np.array(EQ.Depth)
-            temp_vs = np.array(EQ.vs)
-
-            if temp_depth[0] != 0.0:
-                temp_depth = np.insert(temp,0,0.0)
-                temp_vs = np.insert(temp_vs,0,temp_vs[0])
-
-            # - Convert to from m/s to km/s
-            temp_depth = temp_depth/1000.0
-            temp_vs = temp_vs/1000.0
-
-            # - Insert the coordinates
-            self.depth_list = np.insert(temp_depth,len(temp_depth),self.centroid[2])
-            self.vs = np.insert(temp_vs,len(temp_vs),EQ.Betha)
-            self.rho = [Methods.density_profile(v) for v in self.vs]
-
-
-
-        depth_inversed = list(reversed(self.depth_list))
-        vs_inversed = list(reversed(self.vs))
+        depth_inversed = list(reversed(depth_list))
+        velocity_inversed = list(reversed(velocity))
+        
         XY = np.array([EQ.site_coord[0] - self.centroid[0], EQ.site_coord[1] - self.centroid[1]])
         XY_norm = np.linalg.norm(XY)
         
@@ -661,7 +661,7 @@ class psource(EQ):
             R, points = 0., []
             p_i = np.array([self.centroid[0], self.centroid[1]])
             index = 0
-            to_s = 0.
+            t_prop = 0.
             points.append(p_i)
             while Z > 0.:
                 index += 1
@@ -673,10 +673,10 @@ class psource(EQ):
 
                 # - Update variables for next layer
                 Z -= dz
-                theta = np.arcsin(vs_inversed[index]*np.sin(theta)/vs_inversed[index-1])
+                theta = np.arcsin(velocity_inversed[index]*np.sin(theta)/velocity_inversed[index-1])
                 p_i = p_f
                 R += r
-                to_s += r/vs_inversed[index]
+                t_prop += r/velocity_inversed[index-1]
                 
                 # - Save partial results
                 points.append(p_f)
@@ -685,16 +685,17 @@ class psource(EQ):
             if solver is True:
                 return error
             else:
-                return theta, R, points, to_s  
+                return theta, R, points, t_prop  
         ########################################
         
         # - Find optimal solution
         sol = least_squares(ray_propagation, 1, bounds=((0.01,np.pi)))
         if sol.success is True:
-            self.incidence, self.R,  points, self.to_s  = ray_propagation(sol.x[0],solver=False)
+            incidence, R,  points, t_prop  = ray_propagation(sol.x[0],solver=False)
             self.azimuth = np.arccos(XY[0]/XY_norm)
             t3 = time.time()
             t_run = t3-t2
+            return incidence, R,  points, t_prop
         else:
             print('Ray propagation did not SUCCEED')
  ###################### - SPECTRUM DEFINITION - ################################       
