@@ -115,8 +115,8 @@ class source:
         """
         
         correlation_type = 'vonkarman'
-        a_x,a_z,H = 5.0,2.0,0.5
-        slip_mean,slip_cov = 256.0,0.40
+        a_x, a_z, H = 5., 2., 0.5
+        slip_mean, slip_cov = 256., 0.8
         
         if stochastic_field is not None:
             if 'seed' in stochastic_field:
@@ -125,7 +125,7 @@ class source:
                 correlation_type = stochastic_field['correlation_type']
             if 'Mw' in stochastic_field:
                 a_x = 10.0**(-2.5 + 0.5*stochastic_field['Mw'])
-                a_z = 10.0**(-1.5 + (1.0/3.0)*stochastic_field['Mw'])
+                a_z = 10.0**(-1.5 + (1.0/3.)*stochastic_field['Mw'])
             if 'H' in stochastic_field:
                 H = stochastic_field['H']
             if 'slip_mean' in stochastic_field:
@@ -143,8 +143,8 @@ class source:
         length_z = nz*dz# domain width (Z direction)
         
         ### - Prepare the Fourier domain for the 2d transform
-        dkx = 2*np.pi/length_x 
-        dkz = 2*np.pi/length_z 
+        dkx = 2.*np.pi/length_x 
+        dkz = 2.*np.pi/length_z 
 
         # - Computes the discretization of the wavenumbers
         kx1 = np.arange(0,nx/2 + 1)*dkx
@@ -152,7 +152,7 @@ class source:
         kz1 = np.arange(0,nz/2 + 1)*dkz
         kz1 = np.hstack((kz1,np.flipud(kz1[1:int(nz/2)])))
         [kx,kz] = np.meshgrid(kx1, kz1, indexing='ij')
-        k = np.sqrt(kx**2*a_x**2+kz**2*a_z**2) # wavenumber matrix
+        k = np.sqrt(kx**2.*a_x**2. + kz**2.*a_z**2.) # wavenumber matrix
         
         # - Correlation matrix the rnormal field
         self.random_data,phase_information = self.random_slip(nx,nz)
@@ -179,7 +179,8 @@ class source:
     
         # - Scale to median slip distribution 
         slip_dist = slip_mean + slip_std * spatial_correlated # transforming and stretching the output
-        self.slip_dist = np.maximum(0.0, slip_dist) # limiting the minimum to zero
+        # - Check for zero or negative slips
+        self.slip_dist = np.maximum(1e-5, slip_dist) # limiting the minimum to zero
 
     
     def random_slip(self,nx,nz):
