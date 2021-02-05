@@ -11,7 +11,8 @@ shared between GMSM, Otarola and SMSIM
 """
 from scipy.optimize import least_squares
 from scipy import signal as ScipySignal
-from scipy.signal import butter,lfilter,sosfilt
+from scipy.signal import butter, lfilter, sosfilt
+import matplotlib.pyplot as plt
 import scipy.integrate as it
 import scipy
 from Source import source
@@ -27,12 +28,134 @@ class GMSM():
         Loading of the correlation matrix, must always be stored in the same root as this file
         """
         dir_path = os.path.dirname(os.path.realpath(__file__))
-        with open(dir_path + '/' + 'FAS_correlation_Bayless2019.pkl', 'rb') as f:
-            self.corr_freqs, self.corr = pickle.load(f)
+        with open(dir_path + '/' + 'correlations.pkl', 'rb') as f:
+            Bayless = pickle.load(f)
         f.close()
+        
+        self.freqs_corr = Bayless['freqs']
+        self.w_corr = Bayless['W'] # - Within event correlation matrix
+        self.within_site_corr = Bayless['within-site'] # - Within event correlation matrix
+        self.total_corr = Bayless['Total'] # - Total correlation matrix
         
         # - Load the correlation 
         self.smooting_values()
+######################################################################  
+    def find_nearest(self, array, reference):
+        """
+        Finds the entry index, inside the array, of the value closest to a reference
+        """
+        array = np.asarray(array)
+        idx = (np.abs(array - reference)).argmin()
+        return idx
+######################################################################      
+    def ComputeVs30(self, depth, vs, limit_depth=30.):
+        """
+        Computes the average shear wave velocity for a soil column.
+        usually the 30m is considered, however this can be done to any desired value.
+        Units must be consistent
+        
+        Parameters:
+            depth: List with the depths of the layer interfaces
+            velocity: List with the propagation velocity of each layer
+            limit_depth: Limit at which to compute the mean velocitty
+        
+        """
+        # - Check the limit of the soil profile
+        if depth[-1] < limit_depth:
+            limit_depth = depth[-1]
+        
+        if depth[0] != 0.:
+            depth = np.insert(depth, 0, 0.)
+            
+        time, dz = 0., 0.5
+        z = dz
+        while z <= limit_depth:
+            index = np.where(depth >= z)[0][0]
+            vs_i = vs[index-1]
+            time += dz/vs_i
+            z += dz
+            
+        return limit_depth/time
+######################################################################      
+    def snells_direct_prop(self, parameters, Solver=False):
+        """
+        Propagates a direct ray based on Snells law.  Starts from the source and goes to the surface.  Since its a direct ray, total horizontal
+        travelled distance should equal the epicentral distance (R_ref)
+        Parameters:
+            A dictionary with the following keys
+                theta: Float with the initial incidence angle (from the source, to the first interface above it)
+                start_point: List with the cartesian coordinates of the starting point
+                target: List with the cartesian coordinates of the target point
+                z: List with the depths of the layer interfaces, given from the surface (0.0) to the maximum depth considered, zero and source depth included 
+                v: List with the propagation velocity of each layer.  The velocity in each entry corresponds to the propagation velocity belw that level
+            
+            UNITS BETWEEN DEPTH AND VELOCITY SHOULD MATCH
+        
+        """
+        z, v, pi, pf, theta = parameters['z'], parameters['v'], parameters['start_point'], parameters['target'], parameters['theta']
+        X_ref = ((pi[0]-pf[0])**2. + (pi[1]-pf[1])**2.)**0.5
+        
+        
+        # - Inverse the lists to propagate towards the surface
+        z_inv = list(reversed(z))
+        v_inv = list(reversed(v))
+
+        R, X, t_travel = 0., 0., 0.
+        for i in range(len(v_inv)):
+            dz = z_inv[i] - z_inv[i+1]
+            x = np.tan(theta)*dz
+            r = (dz**2. + x**2.)**0.5
+            if i < len(v_inv)-1:
+                theta = np.arcsin(np.sin(theta)*v_inv[i+1]/v_inv[i])
+
+            R += r
+            X += x
+            t_travel += r/v_inv[i]
+
+        if Solver is True:
+            return X_ref - X
+        else:
+            return R, theta, t_travel
+
+######################################################################
+    def ray_propagation_bisection(self, a, b, N, tolerance, data):
+        data_a, data_b, data_mn = copy.deepcopy(data), copy.deepcopy(data), copy.deepcopy(data)
+        data_a['theta'], data_b['theta'] = a, b
+        f_a = self.snells_direct_prop(data_a, Solver=True)
+        f_b = self.snells_direct_prop(data_b, Solver=True)    
+        
+        if f_a*f_b >= 0:
+            print("Ray propagation - Bisection method fails.")
+            return None
+        
+        counter = 0
+        error = 1e9
+        a_n = a
+        b_n = b
+        while error > tolerance or counter < N:
+            data_a['theta'], data_b['theta'] = a_n, b_n
+            f_an = self.snells_direct_prop(data_a, Solver=True)
+            f_bn = self.snells_direct_prop(data_b, Solver=True)  
+                
+            mn = (a_n + b_n)/2.
+            data_mn['theta'] = mn
+            f_mn = self.snells_direct_prop(data_mn, Solver=True)
+            
+            if f_an*f_mn < 0.:
+                a_n = a_n
+                b_n = mn
+            elif f_bn*f_mn < 0.:
+                a_n = mn
+                b_n = b_n
+            
+            error = f_mn
+            counter += 1
+            
+        if counter <= N:
+            R, theta, t_travel = self.snells_direct_prop(data_mn)
+            return R, theta, t_travel
+        else:
+            print("Ray propagation - No solution found")
 
 ######################################################################  
     def boxcar_window(self, n):
@@ -41,17 +164,75 @@ class GMSM():
         window[-1] = 0.
         return window
 ######################################################################  
-    def scale_spectrum(self,A_spectrum, noise_fft, noise_freqs, time, standard_freqs, factor=None):
+    def scale_spectrum(self,A_spectrum, noise_fft, noise_freqs, time, standard_freqs, factor=None, TF=None, incidence=None,
+                       polarization=None, wave_type=None):
+
+        # - RESPONSE FUNCTIONS - #
+        if TF is not None:
+            if incidence is not None:
+                angles = np.array(list(TF.keys())) 
+                angles_radians = angles*np.pi/180. # - Transform to radians
+                if incidence <= angles_radians.max() and incidence >= angles_radians.min():
+                    index = min(range(len(angles_radians)), key=lambda i: abs(angles_radians[i] - incidence))
+                    tf_freqs = TF[angles[index]][wave_type][polarization]['freqs']
+                    tf = TF[angles[index]][wave_type][polarization]['comp']
+                    tf_function = scipy.interpolate.interp1d(tf_freqs, tf, kind='linear')
+                else:
+                    print('angle = ', str(incidence), ' - not covered')
+            else:
+                print('Incidence angle not included')
+                
+
+        # - UNDERLINE SPECTRUM - #
         A_spectrum = np.array(A_spectrum)
-        A = []
-        for i in range(len(noise_fft)):
-            spectrum_factor = np.interp(abs(noise_freqs[i]), standard_freqs, A_spectrum)
-            A.append(spectrum_factor*noise_fft[i])
-        
-        if factor is None:
-            A = np.array(A)    
+        spectrum_function = scipy.interpolate.interp1d(standard_freqs, A_spectrum, kind='linear')
+        n = len(noise_fft)
+
+        if n%2 == 0.:
+            freqs_interp = noise_freqs[:int(n/2)]
+            
+            # - Site response functions
+            if TF is None:
+                site = 1.
+            else:
+                site_temp = tf_function(freqs_interp)
+                site_temp_inv = np.conj(copy.deepcopy(site_temp)[::-1])
+                site = np.concatenate((site_temp, np.array([site_temp[-1]]), site_temp_inv[:-1]))
+
+            # - Underline spectra
+            spectrum_temp = spectrum_function(freqs_interp)
+            spectrum_temp_inv = copy.deepcopy(spectrum_temp)[::-1]
+            spectrum = np.concatenate((spectrum_temp, np.array([spectrum_temp[-1]]), spectrum_temp_inv[:-1]))
+            A = noise_fft*site*spectrum
         else:
-            A = np.array(A)*factor
+            freqs_interp = freqs[:int(n/2)+1]
+            
+            # - Site response functions
+            if TF is None:
+                site = 1.
+            else:
+                site_temp = tf_function(freqs_interp)
+                site_temp_inv = np.conj(copy.deepcopy(site_temp)[::-1])
+                site = np.concatenate((site_temp, site_temp_inv[:-1]))
+                
+            # - Underline spectra
+            spectrum_temp = spectrum_function(freqs_interp)
+            spectrum_temp_inv = copy.deepcopy(spectrum_temp)[::-1]
+            spectrum = np.concatenate((spectrum_temp, spectrum_temp_inv[:-1]))
+            A = noise_fft*site*spectrum
+        
+        #A = []
+        #for i in range(len(noise_fft)):
+            #spectrum_factor = np.interp(abs(noise_freqs[i]), standard_freqs, A_spectrum)
+            #if tf is None:
+                #site = 1.
+            #else:
+                #site = np.interp(abs(noise_freqs[i]), tf_freqs, tf)
+            #A.append(spectrum_factor*noise_fft[i]*site)
+        
+        if factor is not None:
+            A = A*factor
+            
         sim_acc = self.IFFT(A,norm='ortho')
         time_array = np.linspace(0.,max(time), len(sim_acc))
         dt = time_array[1]- time_array[0]
@@ -63,8 +244,8 @@ class GMSM():
         i = theta
         j_p = np.arcsin(np.sin(i)/vp*vs)
         p = np.sin(j_p)/vs
-        X = 1/vs**2 - 2*p**2
-        Y = 4*np.cos(i)*np.cos(j_p)/(vp*vs)
+        X = 1./vs**2 - 2*p**2
+        Y = 4.*np.cos(i)*np.cos(j_p)/(vp*vs)
         Z = X**2 + p**2*Y
         P_vertical = abs(2*X/(vs**2*Z))
         P_radial = Y/(vs**2*Z)
@@ -165,8 +346,12 @@ class GMSM():
         return rld,rw
 
     ###################################################################### 
-    def compute_rupture_distances(self,vertices,site,n=None):
+    def compute_rupture_distances(self, vertices, site, n=None):                
+    
         vertices = np.array(vertices)
+        if len(vertices.shape) == 1:
+            vertices = np.expand_dims(vertices, axis=0)
+            
         site = np.array(site)
         if n is None:
             n = 10
@@ -185,7 +370,7 @@ class GMSM():
             ## - Compute the parametric equation of the side
             dL = x[1] - x[0]
             po = x[0]
-            ## - Evaluate al points within the discretization
+            ## - Evaluate all points within the discretization
             for i in ti:
                 point = po + i*dL
                 ### - R_rup computation
@@ -205,6 +390,31 @@ class GMSM():
                 r_jb_list.append(r_jb)
         R_jb,R_rup = min(r_jb_list),min(r_rup_list)
         return R_rup,R_jb
+    
+    ###################################################################### 
+    def rupture_distances(self, ps, site):
+        ps_position = np.array(ps)
+        site = np.array(site)
+        
+        if len(ps_position.shape) == 1:
+            ps_position = np.expand_dims(ps_position, axis=0)
+
+        
+        def R_rup_compute(pi, site):
+            return np.linalg.norm(pi-site)
+        
+        def R_jb_compute(pi, site):
+            pi[2] = 0.
+            return np.linalg.norm(pi-site)
+        
+        ps_r_rup, ps_r_jb = np.zeros(ps_position.shape[0]), np.zeros(ps_position.shape[0])
+        for i in range(ps_position.shape[0]):
+            ps_r_rup[i] = R_rup_compute(ps_position[i], site)
+            ps_r_jb[i] = R_jb_compute(ps_position[i], site)
+
+        R_rup, R_jb, R_x = ps_r_rup.min(), ps_r_jb.min(), ps_r_jb.max()
+            
+        return R_rup, R_jb, R_x
      ######################################################################
     def check_if_in_plane(self,vertices,point,print_info=None):
         # - Establish the limits of the plane
@@ -254,8 +464,8 @@ class GMSM():
         geographical coordinates
         """
         from math import radians, sin, cos, asin, sqrt
-        lon1,lon2 = p1[0],p2[0]
-        lat1,lat2 = p1[1],p2[1]
+        lon1, lon2 = p1[0], p2[0]
+        lat1, lat2 = p1[1], p2[1]
         
         lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])    
         dlon = lon2 - lon1
@@ -264,20 +474,23 @@ class GMSM():
         return 2 * 6371 * asin(sqrt(a))
         
     ######################################################################  
-    def locate_site(self,reference_global,point_global,reference=None):
+    def locate_site(self, reference_global, point_global, reference=None, depth=False):
         """
         Transforms the global location to relative
         reference_global : [long(degree),lat(degree),z(km)]
         point_global : [long(degree),lat(degree),z(km)]
         reference_epicenter : [x,y,z] - reference to the epicenter
         """
-        lon1,lon2 = reference_global[0],point_global[0]
-        lat1,lat2 = reference_global[1],point_global[1]
+        lon1, lon2 = reference_global[0], point_global[0]
+        lat1, lat2 = reference_global[1], point_global[1]
         
-        dx = (lon2-lon1)*40000*math.cos((lat1+lat2)*math.pi/360)/360
-        dy = (lat2-lat1)*40000/360
+        dx = (lon2-lon1)*40000.*math.cos((lat1+lat2)*math.pi/360.)/360.
+        dy = (lat2-lat1)*40000./360.
         
-        point_relative = [reference[0] + dx,reference[1] + dy,0.0]
+        if depth is False:
+            point_relative = [reference[0] + dx, reference[1] + dy, 0.]
+        elif depth is True:
+            point_relative = [reference[0] + dx, reference[1] + dy, point_global[2]]
         return point_relative
     ######################################################################  
     def plot_layout(self,vertices,site_coord,Hypocenter,depth=None):
@@ -408,7 +621,7 @@ class GMSM():
             betha = 2.927*8**0.086
         return betha
  ######################################################################       
-    def density_profile(self,betha):
+    def density_profile(self, betha):
         """
         Generic density model, taken from Boore, 2003.
         """
@@ -429,13 +642,16 @@ class GMSM():
         t_rupture = d_rup/v_rupture
         return R_hyp,t_rupture
  ######################################################################         
-    def white_noise(self,samples_t,random_seed=None):
+    def white_noise(self,samples_t, standard_dev=None, random_seed=None):
         if random_seed is None:
             random_seed = np.random.randint(0,10000)
         
         np.random.seed(random_seed)
-        mean = 0
-        std = 1
+        mean = 0.
+        if standard_dev is None:
+            std = 1.
+        else:
+            std = standard_dev
         wNoise = np.random.normal(mean, std, size=samples_t)
         return wNoise
 ######################################################################    
@@ -443,29 +659,27 @@ class GMSM():
         import math as m
         # - Create the window
         Tw = window['f_tgm']*Tgm
-        b = -(window['epsilon_window']*m.log(window['nu_window']))/(1+window['epsilon_window']*(m.log(window['epsilon_window'])-1))
+        b = -(window['epsilon_window']*m.log(window['nu_window']))/(1.+window['epsilon_window']*(m.log(window['epsilon_window'])-1.))
         c = b/(window['epsilon_window']*Tw)
-        a = (np.exp(1)/window['epsilon_window'])**b
+        a = (np.exp(1.)/window['epsilon_window'])**b
         """
         Window is computed to match the parameters given in Boore (2003), however it is extended
         until it reaches a value of 0.005 its intensity, so as decay the signal in a natural way
         """
         envelope = []
-        time,count,w_max,stop_flag = [],-1,0.0,False
-        while stop_flag is False:
-            count += 1
-            t = count*dt
+        time, t = [], 0.
+        flag = True
+        while flag == True:
             time.append(t)
-            wind = (a*(t/Tw)**b)*m.exp(-c*t)
-            envelope.append(wind)
-            if wind >= w_max:
-                w_max = wind
-            if wind < 0.0005*w_max:
-                stop_flag = True
-
+            w = (a*(t/Tw)**b)*m.exp(-c*t)
+            envelope.append(w)
+            t += dt
+            if t/Tw > window['epsilon_window'] and w < 0.005:
+                flag = False
+        
         return np.array(time), np.array(envelope)
 ######################################################################  
-    def norm_power_spec(self,fft,freqs):
+    def norm_power_spec(self, fft, freqs):
         """
         Algorithm to normalize the mean of amplitude spectrum of a fourier 
         transform. 
@@ -482,7 +696,7 @@ class GMSM():
         Method creates correlated fourier spectrum based on the empirical model by 
         Bayless 2019 ( values up to 24 Hz).
         """
-        df = 0.005
+        df = 0.002
         # - Introduce the possibility of a seed to control the random events
         if random_seed is None:
             random_seed = np.random.randint(0,10000)
@@ -490,7 +704,7 @@ class GMSM():
         
         # - Compute the correlated samples
         L = np.linalg.cholesky(self.corr)
-        Z = np.array([np.random.normal(0.0,1.0) for i in range(len(self.corr_freqs))])
+        Z = np.array([np.random.normal(0., 1.) for i in range(len(self.corr_freqs))])
         Y = np.dot(L, Z)*0.65 # - Multiply for the standard deviation 
 
         frequencies = np.arange(0.1, 23.99, df)
@@ -516,72 +730,132 @@ class GMSM():
             fft_pos = fas*np.exp((1j)*phase)
             fft_neg = np.conj(fft_pos) 
             fft = np.concatenate((DC,fft_pos,np.flip(fft_neg,axis=0)))
-        return fft                    
- ######################################################################       
-    def site(self, amp_type, amp_freq, amp_funct, Hypocenter, depth_list,
-             betha_list, density_list, betha,density, f_max, kappa, freq,
-             kappa_type=None, shift_freq=None):
-        """
-        Amplification and de amplification terms for effects other than the path
-        """
-
-        ### --- Paramters: Z_s - Rupture depth, Betha - Profile of velocities --- ###
-        # Rho - profile of densities, Depth - Array with depths for the previous profiles
-        freq = np.array(freq)
-        
-        # - Amplification
-        if amp_type == 'quarter_wavelength':
-            z_s = Hypocenter[2]
-            z_list_short = np.linspace(0.0,1.0,200)
-            z_list_long = np.linspace(1.01,z_s,20)
-            z_list = np.concatenate((z_list_short,z_list_long))
-            
-            betha_list = [np.interp(z,depth_list,betha_list) for z in z_list]
-            rho_list = [np.interp(z,depth_list,density_list) for z in z_list]
+        return fft               
     
-            f = []
-            rho_avg = []
-            betha_avg = []
-            A = []
-            for i in range(1,len(z_list)):
-                z_temp = z_list[0:i+1]
-                rho_temp = rho_list[0:i+1]
-                betha_temp = []
-                for j in range(i+1):
-                    betha_temp.append(1/betha_list[j])
-                    
-                rho = integrate.simps(rho_temp,z_temp,even='avg')/z_list[i]
-                rho_avg.append(rho)
-                betha = z_list[i]/integrate.simps(betha_temp,z_temp,even='avg')
-                betha_avg.append(betha)
-                stt = z_list[i]/betha
-                f.append(1/(4.0*stt))
-                A.append(((betha*density/1.0)/(betha*rho))**0.5)
+ ######################################################################       
+    def quarter_wavelength_amp(self, z, v, rho, freqs_stand=None):    
+        """
+        Amplification based on the impedance contrast with respect to the source.  Computation based on the quarter - wavelength
+        method.
+        
+        Parameters:
+            z:     List with the boundaries for the wave propagation velocities.  Starts at 0. Units in (m)
+            v:    List with wave propagation velocities at the boundaries of the Z list.  The first entry corresponds to the propagation velocity
+                    from the first to the second entry of the Z list.  Units in (m/s)
+            rho:   List with the densities at the boundaries of the Z list. Units in (kg/m3)
+            freqs: List with the standard frequencies
             
-            f = list(reversed(f))
-            A = list(reversed(A))
-            Amp_standard = np.array([np.interp(f_i,f,A) for f_i in freq])
+        If units are not in 'm' the frequency range will be wrong
+        """
+        # -------------------------------------------------------------------------------------------
+        ## - Discretization of the media
+        if z[-1] < 150.:
+            z_list = np.linspace(0.0, z[-1], 50)
+        else:
+            z_list_short, z_list_long = np.linspace(0.0, 150., 75), np.linspace(151, z[-1], 20)
+            z_list = np.concatenate((z_list_short,z_list_long))
+
+        def interpolate_soil_profile(zi, z_ref, v_ref):
+            index = np.where(z_ref <= zi)[0][-1]
+            if index == 0:
+                """
+                Since the depth array has an extry entry (z = 0.) this if-statement
+                catches the difference in the length of velocity or density and the
+                depth array
+                """
+                return v_ref[index]
+            else:
+                return v_ref[index-1]
             
-        elif amp_type == 'uniform':
+        velocity_list = np.array(([interpolate_soil_profile(zi, z, v) for zi in z_list]))
+        rho_list = np.array(([interpolate_soil_profile(zi, z, rho) for zi in z_list]))  
+        # -------------------------------------------------------------------------------------------    
+        ## - Amplification
+        Z_source = rho_list[-1]*velocity_list[-1]
+        f = []
+        rho_avg = []
+        betha_avg = []
+        A = []
+        for i in range(len(z_list)-1):
+            z_temp = z_list[0:z_list.shape[0]-i]
+            rho_temp = rho_list[0:z_list.shape[0]-i]
+            betha_temp = velocity_list[0:z_list.shape[0]-i]
+            z_f = z_temp[-1]
+            rho_bar = scipy.integrate.simps(rho_temp,z_temp,even='avg')/z_f   
+            velocity_bar = z_f/scipy.integrate.simps(1./betha_temp,z_temp,even='avg')
+            Z_bar = rho_bar*velocity_bar
+            f_z = velocity_bar/(4*z_f)
+            f.append(f_z)
+            A.append((Z_source/(velocity_bar*rho_bar))**0.5)
+
+        f = list(reversed(f))
+        A = list(reversed(A))
+        
+        if freqs_stand is not None:
+            function = scipy.interpolate.interp1d(f, A, kind='linear', bounds_error=False,
+                                          fill_value=(A[0], A[-1]))
+            return function(freqs_stand)
+        else:
+            return np.array(f), np.array(A)
+    
+ ######################################################################       
+    def site(self, amp_type, amp_freq, amp_funct, freq, kappa=None, f_max=None, lowpass=None,
+             f_max_exp=8.):
+        # --------------------------------------------------- #
+        ## - Amplifictation
+        if amp_type == 'uniform':
             Amp_standard = np.full((len(freq),),1.)
         else:
             Amp_standard = np.array([np.interp(f_i,amp_freq,amp_funct) for f_i in freq])
-        
+        # --------------------------------------------------- #
         ## - Diminution
-        if f_max == None:
-            if kappa_type is None:
-                D = np.exp(-1*math.pi*kappa*freq) 
-            elif kappa_type is 'shifted':
-                if shift_freq is None:
-                    f_shift = 15.
-                else:
-                    f_shift = shift_freq
-                D = np.array([1. if f_i <= f_shift else np.exp(-1.*math.pi*kappa*(f_i - f_shift)) for f_i in freq])
-        else:
-            D = (1.+(freq/f_max)**8.)**-0.5
+        if f_max is not None:
+            D = (1.+(freq/f_max)**f_max_exp)**-0.5
         
+        elif lowpass is not None:
+            f_Max = lowpass['fmax']
+            order = lowpass['order']
+            b, a = butter(order, f_Max, 'low', analog=True)
+            w, h = scipy.signal.freqs(b, a) 
+            D = np.array([np.interp(fi, w, abs(h)) for fi in freq])
+  
+        elif kappa is not None:
+            D = np.exp(-1*math.pi*kappa*freq) 
+        
+        else:
+            print('Select a ONLY a Diminution method')
+        
+        # --------------------------------------------------- #
         G = D*Amp_standard
         return G                
+ ######################################################################       
+    def site_amplification(self, freq, amp_freq, amp):
+        # --------------------------------------------------- #
+        ## - Amplifictation
+        function = scipy.interpolate.interp1d(amp_freq, amp)        
+        return function(freq)
+
+ ######################################################################       
+    def site_attenuation(self, freq, kappa=None, f_max=None, lowpass=None, f_max_exp=8.):
+        # --------------------------------------------------- #
+        ## - Diminution
+        if f_max is not None:
+            D = (1.+(freq/f_max)**f_max_exp)**-0.5
+        
+        elif lowpass is not None:
+            f_Max = lowpass['fmax']
+            order = lowpass['order']
+            b, a = butter(order, f_Max, 'low', analog=True)
+            w, h = scipy.signal.freqs(b, a) 
+            D = np.array([np.interp(fi, w, abs(h)) for fi in freq])
+  
+        elif kappa is not None:
+            D = np.exp(-1*math.pi*kappa*freq) 
+        
+        else:
+            print('Select a ONLY a Diminution method')
+
+        return D
     
     #####################################################################################
     ######################### INTENSITY MEASURES  METHODS ###############################
@@ -706,7 +980,7 @@ class GMSM():
 
         return RotD,RotI        
     ###################################################################################
-    def ComputeFAS(self,parameters):
+    def ComputeFAS(self,parameters,phase=None):
         """
         Computes the Fourier Amplitude Spectrum of a given time series
         
@@ -715,11 +989,16 @@ class GMSM():
             dt      : time step - (float)
         """
         # - Compute the fourier transform of the acceleration
-        acc, dt = parameters['acc'],parameters['dt']
+        acc, dt = parameters['acc'], parameters['dt']
         n = len(acc)
-        FAS = 2.0*np.abs(np.fft.rfft(acc))
+        fft = np.fft.rfft(acc)
+        phases = np.angle(fft)
+        FAS = 2.*np.abs(fft)
         freqs = np.fft.rfftfreq(n, d=dt)
-        return freqs, FAS 
+        if phase is True: 
+            return freqs, FAS, phases
+        else: 
+            return freqs, FAS
     ######################################################################        
     def FAS_rotComp(self,ew_acc,ns_acc,d_az,pp,dt):
         """
@@ -790,7 +1069,7 @@ class GMSM():
             
         return periods,Sa
     ######################################################################        
-    def spectrum_rotComp(self,ew_acc,ns_acc,d_az,pp,dt,periods,damping):
+    def spectrum_rotComp(self, ew_acc, ns_acc, d_az, pp, dt, periods, damping):
         """
         Computes the orientation independent intensity measure spectrum, 
         for two horizontal perpendicular components
@@ -818,11 +1097,8 @@ class GMSM():
             interest: list including the amounts of energy of interest, these will be identified in the plot
             plot: Boolean indicating if plotting or notation
         """
-        interest = None
         acc, dt, units = np.array(parameters['acc']), parameters['dt'], parameters['units']
-        if 'interest' in parameters:
-            interest = parameters['interest']            
-            
+                    
         if units == 'g':
             acc_sq = (acc*981.)**2. 
         elif units == 'cm/s2':
@@ -843,6 +1119,26 @@ class GMSM():
         function_params = {'units':units,'dt':dt}
         time,RotD,RotI = self.rotComp_array(ew_acc,ns_acc,d_az,pp,self.ariasI,function_params)
         return time,RotD,RotI
+    ######################################################################   
+    def duration(self, parameters):
+        """
+        Computes the duration of the ground motion of the ground motion between two perecentages of
+        the maximum arias intensity 
+        
+        **parameters: dictionary containing the following keys:
+            acc: list or array of acceleration time history - (list/numpy array)
+            dt: time step - (float)
+            units: Describes the types of acceleration units, all are converted to gals cm/s2 - (string)
+                    -'g'
+                    -'cm/s2'
+                    -'m/s2'
+            threshold: List or array with two entries defining the Arias threshold to compute the duration
+        """
+        threshold = parameters['threshold']
+        t_arias, arias = self.ariasI(parameters)
+        start = np.where(arias >= arias.max()*threshold[0])[0][0]
+        end = np.where(arias >= arias.max()*threshold[1])[0][0]
+        return t_arias[end] - t_arias[start]
 
     ###################################################################### 
     def CAV(self,parameters):
@@ -1107,7 +1403,7 @@ class GMSM():
             plt.show()
             plt.close()
         
-        return vel,disp  
+        return vel, disp  
     ###################################################################################
     def KonnoOmachi(self,parameters):
         """
@@ -1143,12 +1439,12 @@ class GMSM():
         if fas_boolean is not True:
             # - Compute the fourier transform of the acceleration
             n = len(acc)
-            FFT = 2.0*np.abs(np.fft.rfft(acc))
+            FFT = 2.*np.abs(np.fft.rfft(acc))
             freqs = np.fft.rfftfreq(n, d=dt)
         else:
             FFT,freqs = FAS,freqs
         
-        def ko(fft,dt,dx,bexp,fmax):
+        def ko(fft, dt, dx, bexp, fmax):
             y = fft
             if fmax > 1.0/(2.0 * dt):
                 nx = len(y)
@@ -1229,7 +1525,7 @@ class GMSM():
             acc,dt = parameters['acc'],parameters['dt']
             # - Compute the fourier transform of the acceleration
             n = len(acc)
-            FFT = 2.0*np.abs(np.fft.rfft(acc))
+            FFT = 2.*np.abs(np.fft.rfft(acc))
             freqs = np.fft.rfftfreq(n, d=dt)
         else:
             FFT,freqs = FAS,freqs
@@ -1404,7 +1700,7 @@ class GMSM():
             
         return time_crossings,cumulative_crossings,time_freq,freq
 ###################################################################################
-    def process_PEER_records(self,path,factor):
+    def process_PEER_records(self,path, factor):
         """
         Processes the time history to output, 1) List with accelerations
         2) spectrum  and 3) dt of the time history
@@ -1506,14 +1802,13 @@ class GMSM():
             Tpad = 1.5*n/fc
             n_tpad = int(round(Tpad/(2*dt)))
             zeros_array = np.zeros(n_tpad)
-            acc_zero_pad = np.concatenate((zeros_array,acc,zeros_array))
+            acc_zero_pad = np.concatenate((acc, zeros_array, zeros_array))
             return acc_zero_pad
     
         # - Butter - filter
         def butter_highpass_filter(data,fc,dt,order=None):
-            from scipy.signal import butter,lfilter,sosfilt
-            fs = int(1.0/dt)
-            omega = fc/(fs/2.0)
+            fs = int(1./dt)
+            omega = fc/(fs/2.)
             sos = butter(order, omega, 'high', output='sos')
             filtered = sosfilt(sos, data)
             return filtered
@@ -1556,15 +1851,14 @@ class GMSM():
             dt              : time step - (float)
             t_analysis           : length of the analysis window - (float)
             overlap_percent : percentage of the window to be overlapped - (float)
-            variance        : Estimate variance if True - (Boolean)
+            arias_threshold : List with the two boundaries of the arias intensity desired
+                units       : Acceleration units
+            
         """
         variance = None
-        acc,dt,t_ana,overlap_percent = parameters['acc'],parameters['dt'],parameters['t_analysis'],parameters['overlap_percent']
-        if 'variance' in parameters:
-            variance = parameters['variance']
-            
-        import operator
+        acc,dt,t_ana,overlap_percent = parameters['acc'], parameters['dt'], parameters['t_analysis'], parameters['overlap_percent']
         time = np.linspace(0.0,dt*len(acc),len(acc))
+
         to = 0.0
         tf = t_ana
         groups = {}
@@ -1580,7 +1874,7 @@ class GMSM():
                 
             ### - Compute the fourier transform of the acceleratiob
             n = len(temp)
-            FFT = 2.0*np.abs(np.fft.rfft(temp))
+            FFT = 2.*np.abs(np.fft.rfft(temp))
             freqs = np.fft.rfftfreq(n, d=dt)
             # - Compute the weighted average
             num = np.sum(FFT*FFT*freqs)
@@ -1589,19 +1883,36 @@ class GMSM():
                 fc = 0.0 
             else: 
                 fc = num/den
-            
-            if variance is True:
-                # - Compute the variance
-                num = np.sum( (freqs-fc)*(freqs-fc) * FFT*FFT)
-                fb = np.sqrt( num/den )
-                freqs_var_list.append(fb)
+
             freqs_list.append(fc)
             time_list.append(t_mean)
             to,tf = tf-t_ana*overlap_percent,tf + t_ana*(1-overlap_percent)
-        if variance is True:
-            return np.array(time_list),np.array(freqs_list),np.array(freqs_var_list)
-        else:
-            return np.array(time_list),np.array(freqs_list)
+            
+        time_inst, freq_inst = np.array(time_list),np.array(freqs_list)
+            
+        # - Crop the signals to include the correlation in the energetic band
+        if 'arias_threshold' in parameters:
+            units = parameters['units']
+            arias_threshold = parameters['arias_threshold']
+            start_index, end_index = 1e10, 0
+            t, arias = self.ariasI({'acc':acc, 'dt':dt, 'units':units})
+            Arias = max(arias)
+            start = np.where(arias > Arias*arias_threshold[0])[0][0]
+            end = np.where(arias >= Arias*arias_threshold[1])[0][0]
+            if start < start_index:
+                start_index = start
+            if end > end_index:
+                end_index = end  
+                
+            # - Find the indexes in the instantaneous frequency array
+            t0, tf = t[start_index], t[end_index]
+            
+            index_initial = np.where(time_inst > t0)[0][0]
+            index_final = np.where(time_inst >= tf)[0][0]
+            freq_inst = freq_inst[index_initial:index_final]
+            time_inst = np.linspace(arias_threshold[0], arias_threshold[1], len(freq_inst))
+            
+        return time_inst, freq_inst
 ################################################################################### 
     def InstFreq_rotComp(self,ew_acc,ns_acc,d_az,pp,dt,t_ana,overlap_percent):
         """
@@ -1626,15 +1937,18 @@ class GMSM():
         
         if show is not True:
             plt.ioff()
-        fig = plt.figure()
+        
+        fig = plt.figure(figsize=(8, 6))
         if title is not None:
             plt.title(title,figure=fig)
         for x,y,legend in zip(X,Y,Legend):
             if legend is None:
                 plt.plot(x,y,figure=fig)
             plt.plot(x,y,label=legend,figure=fig)
-        plt.xlabel(Xaxis_string,fontsize = 12,figure=fig)
-        plt.ylabel(Yaxis_string,fontsize = 12,figure=fig)
+        plt.xlabel(Xaxis_string,fontsize = 14,figure=fig)
+        plt.ylabel(Yaxis_string,fontsize = 14,figure=fig)
+        plt.tick_params(axis="x", labelsize=14)
+        plt.tick_params(axis="y", labelsize=14)
         if log == True:
             plt.xscale('log')
             plt.yscale('log')
@@ -1646,11 +1960,36 @@ class GMSM():
             plt.xlim((x_lim[0],x_lim[1]))
         plt.grid(figure=fig)
         if legend is not None:
-            plt.legend()
+            plt.legend(prop={"size":12})
         if savepath is not None:
             plt.savefig(savepath)
         if show is True:
             plt.show()
+
+        plt.close()
+  ###################################################################################      
+    def plot_histories_stack(self, x, y, Label, Yaxis_string=None, Xaxis_string=None, x_lim=None, y_lim=None):
+        n = len(x)
+        plt.figure(1, figsize=(10,8))
+        plt.subplots_adjust(wspace=0.1, hspace=0.1)
+        for i in range(n):
+            plt.subplot(n,1,i+1)
+            plt.plot(x[i], y[i], label=Label[i])
+            plt.grid()
+            plt.legend(prop={"size":14})
+            if Yaxis_string is not None:
+                plt.ylabel(Yaxis_string, fontsize=14)
+            if i == n-1:
+                if Xaxis_string is not None:
+                    plt.xlabel(Xaxis_string, fontsize=14)
+            plt.tick_params(axis="x", labelsize=12)
+            plt.tick_params(axis="y", labelsize=12)
+            if x_lim is not None:
+                plt.xlim([x_lim[0], x_lim[1]])
+            if y_lim is not None:
+                plt.ylim([y_lim[0], y_lim[1]])
+            
+        plt.show()
         plt.close()
 ###################################################################################
     def KikNet_processing(self,path):
