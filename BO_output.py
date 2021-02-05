@@ -2,8 +2,9 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 from datetime import datetime
-from matplotlib import rc
-rc('text', usetex=True)
+from mpl_toolkits.axes_grid.inset_locator import (inset_axes, InsetPosition,
+                                                  mark_inset)
+
 import numpy as np
 class bo_output:
     def __init__(self):
@@ -46,20 +47,132 @@ class bo_output:
         ref_plot = fig
         return fig
 # ------------------------------------------------------------------------
-    def bias_per_iteration(self,abcissa,bias_per_abcissa,xlegend,save_path=None):
+    def bias_per_iteration(self, abcissa, Bias, duration=None, arias=None, save_path=None):
         plt.ioff()
-        fig = plt.figure(figsize=(8, 6))
+        Bias_Mean, Bias_Std = np.zeros(len(abcissa)), np.zeros(len(abcissa))
+        i = 0
         for ab in abcissa:
-            plt.errorbar(ab, bias_per_abcissa[ab]['bias_mean'], yerr=bias_per_abcissa[ab]['bias_std'],color='b',fmt='s',zorder=10)
-            plt.scatter(bias_per_abcissa[ab]['abcissa'],bias_per_abcissa[ab]['bias'],color='0.75',zorder=1)
+            points = []
+            for key in Bias:
+                for j in range(len(Bias[key][ab])):
+                    points.append(Bias[key][ab][j])
+            Bias_Mean[i] = np.mean(points)
+            Bias_Std[i] = np.std(points)
+            i += 1
+            
+        if duration is None:
+            plt.figure(1, figsize=(8,6))
+            plt.plot(abcissa, Bias_Mean, color='darkorange', label='Sim - mean', zorder=100)
+            plt.fill_between(abcissa, Bias_Mean, Bias_Mean + Bias_Std, color='0.75')
+            plt.fill_between(abcissa, Bias_Mean, Bias_Mean - Bias_Std, color='0.75')
+            plt.plot([abcissa.min(), abcissa.max()], [0., 0.], color='k', linestyle='dashed')
+            plt.xscale('log')
+            plt.grid()
+            plt.xlabel(r"$\mathrm{Period}$" + ' ' +r"$\mathrm{[s]}$",fontsize=18)
+            plt.ylabel(r"$\mathrm{Residual}$",fontsize=18)
+            plt.tick_params(axis='x', labelsize=15)
+            plt.tick_params(axis='y', labelsize=15)
+            plt.xlim([abcissa.min(), abcissa.max()])
+            plt.ylim(-3., 3.)
+            plt.savefig(save_path)
+            plt.close()
+            
+        else:
+            temp_duration, temp_arias = [], []
+            for key in duration:
+                for i in range(len(duration[key])):
+                    temp_duration.append(duration[key][i])
+                    temp_arias.append(arias[key][i])
+            
+            D5_95 = {'mean':np.mean(temp_duration), 'std':np.std(temp_duration)}
+            Arias = {'mean':np.mean(temp_arias), 'std':np.std(temp_arias)}
+            y = [D5_95['mean'], Arias['mean']]
+            y_err = [D5_95['std'], Arias['std']]
+            
+            fig, ax1 = plt.subplots(figsize=(8,6))
+            ax1.plot(abcissa, Bias_Mean, color='darkorange', label='Sim - mean', zorder=100)
+            ax1.fill_between(abcissa, Bias_Mean, Bias_Mean + Bias_Std, color='0.75')
+            ax1.fill_between(abcissa, Bias_Mean, Bias_Mean - Bias_Std, color='0.75')
+            ax1.plot([abcissa.min(), abcissa.max()], [0., 0.], color='k', linestyle='dashed')
+            ax1.set_xscale('log')
+            ax1.set_xlabel(r"$\mathrm{Period}$" + ' ' +r"$\mathrm{[s]}$",fontsize=18)
+            ax1.set_ylabel(r"$\mathrm{Residual}$",fontsize=18)
 
-        plt.xlabel(xlegend,figure=fig,fontsize=16)
-        plt.ylabel(r"$\mathrm{Divergence}$",figure=fig,fontsize=16)
-        plt.grid(figure=fig)
-        plt.savefig(save_path)
-        plt.close(fig)
-        ref_bias_plot = fig
+            ax1.grid()
+            ax1.set_xlim([abcissa.min(), abcissa.max()])
+            ax1.set_ylim(-3., 3.)
+            ax1.tick_params(axis='x', labelsize=15)
+            ax1.tick_params(axis='y', labelsize=15)
 
+            ax2 = plt.axes([0,0,1,1])
+            # Manually set the position and relative size of the inset axes within ax1
+            ip = InsetPosition(ax1, [0.7,0.7,0.25,0.25])
+            ax2.set_axes_locator(ip)
+            x2, labels = [1, 3], [r"$\mathrm{D_{5-95}}$", r"$\mathrm{Arias}$"]
+            ax2.errorbar(x2, y, yerr=y_err, fmt='.k', ms=10)
+            ax2.plot([0, 4.], [0., 0.], linewidth=2, color='k', linestyle='dashed')
+            ax2.grid()
+            # Some ad hoc tweaks.
+            ax2.set_yticks(np.arange(-3,3,1.))
+            ax2.set_xticks(x2)
+            ax2.set_xticklabels(labels, fontsize=14)
+            plt.savefig(save_path)
+            plt.close()
+
+        return Bias_Mean, Bias_Std
+
+#---------------------------------------------------------------------------------------------------------------------------------
+    def plot_individual_comp(self, reference, periods, acc, sa, dt, save_path=None):
+        error = []
+        for i in range(len(sa)):
+            # - Because periods for both spectra are the same
+            e = np.sum(abs(sa[i] - reference))
+            error.append(e)
+        
+        error = np.array(error)
+        lucky_index = np.where(error == error.min())[0][0]
+
+        fig = plt.figure(figsize=(10,8))
+        grid = plt.GridSpec(3, 2, wspace=0.25, hspace=0.3)
+        ax1 = plt.subplot(grid[0, 0])
+        ax2 = plt.subplot(grid[0, 1])
+        ax3 = plt.subplot(grid[1:, 0:])
+
+        ## - NS - ##
+        acc_ns= acc[lucky_index][0]
+        time = np.linspace(0., len(acc_ns)*dt, len(acc_ns))
+        ax1.plot(time, acc_ns, color='darkorange', linewidth=0.75, label='NS-sim')
+        ax1.set_ylabel(r"$\mathrm{acc}$" + ' ' + r"$\mathrm{[cm/s/s]}$", fontsize=16)
+        ax1.legend(loc='upper center', bbox_to_anchor=(0.8, 1.00), prop={"size":14})
+        ax1.tick_params(axis='x', labelsize=14)
+        ax1.tick_params(axis='y', labelsize=14)
+
+        ## - EW - ##
+        acc_ew = acc[lucky_index][1]
+        time = np.linspace(0., len(acc_ew)*dt, len(acc_ew))
+        ax2.plot(time, acc_ew, color='darkorange', linewidth=0.75, label='EW-sim')
+        ax2.set_ylabel(r"$\mathrm{acc}$" + ' ' + r"$\mathrm{[cm/s/s]}$", fontsize=16)
+        ax2.legend(loc='upper center', bbox_to_anchor=(0.8, 1.00), prop={"size":14})
+        ax2.tick_params(axis='x', labelsize=14)
+        ax2.tick_params(axis='y', labelsize=14)
+
+        ## - SPECTRA - ##
+        ax3.plot(periods, reference, 'b-', label='GM - ref', zorder=100)
+        ax3.plot(periods, np.mean(sa, axis=0), color='darkorange', label='GM - mean', zorder=100)
+        for i in range(len(sa)):
+                ax3.plot(periods, sa[i], color='0.75')
+
+        ax3.set_xscale('log')
+        ax3.set_yscale('log')
+        ax3.legend(prop={"size":14})
+        ax3.grid()
+        ax3.tick_params(axis='x', labelsize=14)
+        ax3.tick_params(axis='y', labelsize=14)
+        ax3.set_xlabel(r"$\mathrm{Period}$" + ' ' +r"$\mathrm{[s]}$",fontsize=16)
+        ax3.set_ylabel(r"$\mathrm{S_a}$" + ' ' +r"$\mathrm{[cm/s/s]}$",fontsize=16)
+        ax3.set_xlim([0.01, 3.])
+        plt.savefig(save_path, bbox_inches='tight')
+        plt.close()
 # ------------------------------------------------------------------------
     def frequency_distance_bias_plot(self,dist,mean,std,title=None,save_path=None):
         plt.ioff()
@@ -116,6 +229,7 @@ class bo_output:
         if logscale is True:
             plt.xscale("log")
             plt.yscale("log")
+            plt.xlim([0.01, max(abcissa)])
         plt.xlabel(xlegend,figure=fig)
         plt.ylabel(ylegend,figure=fig)
         plt.grid(figure=fig)
